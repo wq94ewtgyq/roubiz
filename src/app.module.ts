@@ -8,10 +8,21 @@ import { SettlementModule } from './settlement/settlement.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { SalesProductModule } from './sales-product/sales-product.module';
 import { PurchaseProductModule } from './purchase-product/purchase-product.module';
+// [중요] 엑셀 서비스 추가
+import { ExcelService } from './common/excel.service';
 
 @Module({
-  imports: [SalesChannelModule, ProductModule, OrderModule, SettlementModule, DashboardModule, SalesProductModule, PurchaseProductModule],
+  imports: [
+    SalesChannelModule, 
+    ProductModule, 
+    OrderModule, 
+    SettlementModule, 
+    DashboardModule, 
+    SalesProductModule, 
+    PurchaseProductModule
+  ],
   controllers: [AppController],
-  providers: [AppService],
+  // [중요] providers에 ExcelService가 꼭 있어야 합니다!
+  providers: [AppService, ExcelService], 
 })
 export class AppModule {}

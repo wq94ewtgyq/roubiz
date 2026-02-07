@@ -1,57 +1,96 @@
 // src/purchase-product/purchase-product.service.ts
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
+
+// Service 내부 DTO (변수명은 'purchase'로 유지 - 우리가 쓰기 편하게)
+interface CreatePurchaseProductDto {
+  purchaseName: string;
+  dbProductCode: string; 
+  purchaseProductCode?: string;
+  purchaseProductName?: string;
+  costPrice: number;
+}
 
 const prisma = new PrismaClient();
 
 @Injectable()
 export class PurchaseProductService {
 
-  // [등록] 공급처 단가 등록
-  async create(dto: { supplierName: string; dbProductCode: string; cost: number; supplierCode?: string }) {
-    
-    // 1. 우리 상품 찾기
-    const masterProduct = await prisma.dbProduct.findUnique({
-      where: { dbCode: dto.dbProductCode }
-    });
-    if (!masterProduct) throw new NotFoundException('마스터 상품을 찾을 수 없습니다.');
-
-    // 2. 공급처(BusinessRole) 찾기 없으면 자동생성 (편의상)
-    let supplier = await prisma.businessRole.findFirst({
-      where: { businessName: dto.supplierName, isSupplier: true }
+  async create(dto: CreatePurchaseProductDto) {
+    // 1. 우리 상품(DbProduct) 확인
+    const dbProduct = await prisma.dbProduct.findUnique({
+      where: { dbCode: dto.dbProductCode }, 
     });
 
-    if (!supplier) {
-      // 채널타입 1번(오픈마켓 등) 아무거나 연결해서 생성 (실제로는 더 정교해야 함)
-      supplier = await prisma.businessRole.create({
+    if (!dbProduct) {
+      throw new NotFoundException(`상품코드(${dto.dbProductCode})가 시스템에 등록되지 않았습니다.`);
+    }
+
+    // 2. 매입처(BusinessRole) 확인 및 자동 생성
+    let purchase = await prisma.businessRole.findUnique({
+      where: { businessName: dto.purchaseName },
+    });
+
+    if (!purchase) {
+      purchase = await prisma.businessRole.create({
         data: {
-          businessName: dto.supplierName,
-          channelTypeId: 1, // 임시 연결
-          isSupplier: true,
-        }
+          businessName: dto.purchaseName,
+          // [오류 수정 1] DB에는 'isSupplier'라는 컬럼만 존재합니다.
+          isSupplier: true,         
+          salesGroup: 'DT',         
+          description: '자동 생성된 매입처',
+        },
       });
     }
 
-    // 3. 매입 정보 저장
-    return await prisma.purchaseProduct.create({
-      data: {
-        supplierId: supplier.id,
-        dbProductId: masterProduct.id,
-        costPrice: dto.cost,
-        supplierProductCode: dto.supplierCode,
-        isPrimary: true,
+    // 3. 중복 확인
+    const existing = await prisma.purchaseProduct.findUnique({
+      where: {
+        // [오류 수정 2] DB의 복합키 이름은 'supplierId_dbProductId' 입니다.
+        supplierId_dbProductId: {
+          supplierId: purchase.id, // DB 컬럼: supplierId <--- 값: purchase.id
+          dbProductId: dbProduct.id,
+        },
       },
+    });
+
+    if (existing) {
+      throw new BadRequestException(`이미 해당 매입처(${dto.purchaseName})에 등록된 상품입니다.`);
+    }
+
+    // 4. 저장
+    const purchaseProduct = await prisma.purchaseProduct.create({
+      data: {
+        // [오류 수정 3] DB 컬럼명에 맞춰서 매핑해줍니다.
+        supplierId: purchase.id, 
+        dbProductId: dbProduct.id,
+        
+        // 왼쪽(DB컬럼) = 오른쪽(DTO변수)
+        supplierProductCode: dto.purchaseProductCode || '',
+        supplierProductName: dto.purchaseProductName || dbProduct.name,
+        costPrice: dto.costPrice,
+        isPrimary: true, 
+      },
+    });
+
+    return {
+      message: '매입 상품 등록 완료',
+      purchase: purchase.businessName,
+      product: dbProduct.name,
+      costPrice: purchaseProduct.costPrice,
+    };
+  }
+
+  // [전체 조회]
+  async findAll() {
+    return await prisma.purchaseProduct.findMany({
+      // [중요] 여기도 DB 관계명인 'supplier'를 써야 데이터를 가져옵니다.
+      include: { supplier: true, dbProduct: true },
+      orderBy: { id: 'desc' },
     });
   }
 
-  // [조회]
-  async findAll() {
-    return await prisma.purchaseProduct.findMany({
-      include: {
-        supplier: true,
-        dbProduct: true
-      },
-      orderBy: { id: 'desc' }
-    });
+  async remove(id: number) {
+    return await prisma.purchaseProduct.delete({ where: { id } });
   }
 }

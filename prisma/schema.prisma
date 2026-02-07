@@ -1,3 +1,5 @@
+// prisma/schema.prisma
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -7,66 +9,91 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// [1] 채널 & ST/DT 설정
+// ------------------------------------------------------
+// [1] 핵심 분류 (영업 특성 & 정산 트리거)
+// ------------------------------------------------------
+
 enum SalesGroup {
-  ST
-  DT
+  ST // 소매/위탁 (Stock) - 재고 없이 판매
+  DT // 도매/사입 (Direct) - 재고 보유 판매
 }
 
 enum SettlementTrigger {
-  ON_ORDER_CREATED
-  ON_PO_CREATED
-  ON_SHIPPED
+  ON_ORDER_CREATED // 주문 수집 시
+  ON_PO_CREATED    // 발주 생성 시
+  ON_SHIPPED       // 배송 완료 시
 }
 
-model SalesChannelType {
-  id            Int            @id @default(autoincrement())
-  name          String         @unique
-  group         SalesGroup
-  description   String?
-  businessRoles BusinessRole[]
-}
+// ------------------------------------------------------
+// [2] 통합 사업자 관리 (BusinessRole)
+// SalesChannelType 삭제 -> 모든 속성이 여기로 통합됨
+// ------------------------------------------------------
 
 model BusinessRole {
-  id                Int                  @id @default(autoincrement())
-  businessName      String
-  channelTypeId     Int
-  channelType       SalesChannelType     @relation(fields: [channelTypeId], references: [id])
-  settlementTrigger SettlementTrigger    @default(ON_SHIPPED)
+  id                 Int       @id @default(autoincrement())
   
-  isSalesChannel    Boolean              @default(false)
-  isSupplier        Boolean              @default(false)
-  isWarehouse       Boolean              @default(false)
+  // 사업자명 (예: "쿠팡", "건강나라", "인천제1창고")
+  // Controller에서 이름으로 찾기 위해 @unique 필수
+  businessName       String    @unique 
   
-  batches               OrderUploadBatch[]
-  settlementAdjustments SettlementAdjustment[]
+  // [핵심 변경] 영업 특성 (ST/DT) - 판매처일 경우 필수
+  salesGroup         SalesGroup? @default(ST)
   
-  // [NEW] 판매처로서의 상품 매핑 (매출 상품)
-  salesProductMappings  SalesProductMapping[]
+  // [핵심 변경] 엑셀 자동인식 키워드 (예: "쿠팡", "스마트스토어")
+  recognitionKeyword String?
 
-  // [NEW] 공급처로서의 상품 정보 (매입 상품)
+  // 정산 시점 설정
+  settlementTrigger  SettlementTrigger @default(ON_SHIPPED)
+  
+  description        String? // (구 SalesChannelType의 설명 필드 이동)
+
+  // 역할 구분 플래그
+  isSalesChannel     Boolean   @default(false)
+  isSupplier         Boolean   @default(false)
+  isWarehouse        Boolean   @default(false)
+  
+  // ----------------------------------------------------
+  // 관계 (Relations)
+  // ----------------------------------------------------
+  
+  // 1. 주문 업로드 이력 (판매처로서)
+  batches               OrderUploadBatch[]
+  
+  // 2. 상품 매핑 정보 (판매처로서: 쿠팡코드 <-> 우리코드)
+  salesProductMappings  SalesProductMapping[]
+  
+  // 3. 공급 상품 정보 (매입처로서: 우리코드 <-> 공급가)
   suppliedProducts      PurchaseProduct[]
+  
+  // 4. 정산 조정 내역
+  settlementAdjustments SettlementAdjustment[]
 }
 
-// [2] 상품 관리
+// ------------------------------------------------------
+// [3] 상품 관리 (DbProduct)
+// ------------------------------------------------------
+
 model DbProduct {
   id               Int       @id @default(autoincrement())
-  dbCode           String    @unique
+  dbCode           String    @unique // 우리 내부 코드 (예: A001)
   name             String
-  purchaseCost     Decimal?
+  purchaseCost     Decimal?  // 기본 매입원가 (참고용)
   isBundle         Boolean   @default(false)
+  status           String    @default("ACTIVE")
+  
+  // 세트 상품 관계
   referenceId      Int?
   referenceProduct DbProduct? @relation("ReferenceProduct", fields: [referenceId], references: [id])
   variants         DbProduct[] @relation("ReferenceProduct")
-  status           String    @default("ACTIVE")
-  
+
+  // 관계들
   salesMappings      SalesProductMapping[]
   warehouseStocks    WarehouseStock[]
   priceHistory       DbProductPriceHistory[]
   supplierOrderItems SupplierOrderItem[]
   OrderLine          OrderLine[]           @relation("SalesLink")
-
-  // [NEW] 이 상품을 취급하는 매입처 정보들
+  
+  // 이 상품을 취급하는 매입처들 정보
   purchaseProducts   PurchaseProduct[]
 }
 
@@ -79,42 +106,52 @@ model DbProductPriceHistory {
   dbProduct   DbProduct @relation(fields: [dbProductId], references: [id])
 }
 
-// [2-1] 매출 상품 (Sales Product) - 판매처 코드와 우리 코드 연결
+// ------------------------------------------------------
+// [4] 매핑 관리
+// ------------------------------------------------------
+
+// [4-1] 매출 상품 매핑 (판매처 코드 -> 우리 DB코드)
 model SalesProductMapping {
   id               Int          @id @default(autoincrement())
-  clientRoleId     Int
-  clientRole       BusinessRole @relation(fields: [clientRoleId], references: [id]) // [UPGRADE] 관계 연결
   
-  salesProductCode String
-  salesOptionName  String
+  clientRoleId     Int
+  clientRole       BusinessRole @relation(fields: [clientRoleId], references: [id])
+  
+  salesProductCode String       // 판매처 상품코드
+  salesOptionName  String       // 판매처 옵션명
   
   dbProductId      Int
   dbProduct        DbProduct    @relation(fields: [dbProductId], references: [id])
   
+  // 중복 매핑 방지
   @@unique([clientRoleId, salesProductCode, salesOptionName], name: "unique_mapping")
 }
 
-// [2-2] 매입 상품 (Purchase Product) - 공급처 코드와 매입 단가 관리 [NEW]
+// [4-2] 매입 상품 관리 (공급처별 단가 및 코드)
 model PurchaseProduct {
   id                  Int          @id @default(autoincrement())
+  
   supplierId          Int
   supplier            BusinessRole @relation(fields: [supplierId], references: [id])
   
   dbProductId         Int
   dbProduct           DbProduct    @relation(fields: [dbProductId], references: [id])
   
-  supplierProductCode String?      // 공급처에서 쓰는 상품코드
+  supplierProductCode String?      // 공급처에서 쓰는 코드
   supplierProductName String?      // 공급처에서 쓰는 상품명
-  costPrice           Decimal      // 매입 단가 (Cost)
+  costPrice           Decimal      // 이 공급처와의 계약 단가
   isPrimary           Boolean      @default(false) // 주 거래처 여부
 
   createdAt           DateTime     @default(now())
   updatedAt           DateTime     @updatedAt
 
-  @@unique([supplierId, dbProductId]) // 같은 공급처에 같은 상품 중복 등록 방지
+  @@unique([supplierId, dbProductId])
 }
 
-// [3] 주문 및 운영
+// ------------------------------------------------------
+// [5] 주문 (Order)
+// ------------------------------------------------------
+
 enum OrderType {
   NORMAL
   EXCHANGE_T
@@ -122,40 +159,62 @@ enum OrderType {
 }
 
 model OrderUploadBatch {
-  id               Int         @id @default(autoincrement())
+  id               Int          @id @default(autoincrement())
   clientRoleId     Int
   businessRole     BusinessRole @relation(fields: [clientRoleId], references: [id])
   originalFileName String
-  uploadedAt       DateTime    @default(now())
+  uploadedAt       DateTime     @default(now())
   orderLines       OrderLine[]
 }
 
 model OrderLine {
-  id               Int        @id @default(autoincrement())
-  batchId          Int
-  batch            OrderUploadBatch @relation(fields: [batchId], references: [id])
-  externalOrderNo  String
-  systemOrderNo    String?    @unique
-  orderType        OrderType  @default(NORMAL)
+  id                Int       @id @default(autoincrement())
   
-  salesProductCode String
-  salesProductName String?
-  salesOptionName  String?
-  quantity         Int
+  batchId           Int
+  batch             OrderUploadBatch @relation(fields: [batchId], references: [id])
   
+  externalOrderNo   String    // 외부(쿠팡) 주문번호
+  
+  // 시스템 내부 관리번호 (ST-날짜-난수)
+  systemOrderNo     String?   @unique 
+  
+  orderType         OrderType @default(NORMAL)
+  
+  salesProductCode  String
+  salesProductName  String?
+  salesOptionName   String?
+  quantity          Int
+  
+  // 매핑 결과
   mappedDbProductId Int?
   mappedDbProduct   DbProduct? @relation("SalesLink", fields: [mappedDbProductId], references: [id])
-  isSettled        Boolean    @default(false)
   
+  isSettled         Boolean    @default(false)
+  
+  // 하위 연결
   adjustments        OrderAdjustment[]
   supplierOrderItems SupplierOrderItem[]
   salesLedger        SalesLedger?
-  parentLineId     Int?
-  parentLine       OrderLine?  @relation("LineSplit", fields: [parentLineId], references: [id])
-  childLines       OrderLine[] @relation("LineSplit")
+  
+  // 주문 분리/합병 관계
+  parentLineId       Int?
+  parentLine         OrderLine?  @relation("LineSplit", fields: [parentLineId], references: [id])
+  childLines         OrderLine[] @relation("LineSplit")
 }
 
-// [4] 물류/매입
+// ------------------------------------------------------
+// [6] 창고 및 재고
+// ------------------------------------------------------
+
+model WarehouseStock {
+  id          Int       @id @default(autoincrement())
+  dbProductId Int
+  quantity    Int       @default(0)
+  badQuantity Int       @default(0)
+  dbProduct   DbProduct @relation(fields: [dbProductId], references: [id])
+  // 창고ID가 필요하다면 나중에 여기에 warehouseId (BusinessRole) 추가 가능
+}
+
 model SupplierOrderItem {
   id              Int       @id @default(autoincrement())
   dbProductId     Int
@@ -167,27 +226,25 @@ model SupplierOrderItem {
   purchaseLedger  PurchaseLedger?
 }
 
-model WarehouseStock {
-  id          Int       @id @default(autoincrement())
-  dbProductId Int
-  quantity    Int       @default(0)
-  badQuantity Int       @default(0)
-  dbProduct   DbProduct @relation(fields: [dbProductId], references: [id])
-}
+// ------------------------------------------------------
+// [7] 정산 (Ledger)
+// ------------------------------------------------------
 
-// [5] 정산
 model SalesLedger {
   id                        Int       @id @default(autoincrement())
   orderLineId               Int       @unique
-  targetMonth               String
+  targetMonth               String    // YYYY-MM
+  
   confirmedSalePrice        Decimal?
   confirmedSupplyPrice      Decimal?
   confirmedCommission       Decimal?
   confirmedTaxInvoiceAmount Decimal?
   returnFee                 Decimal   @default(0)
+  
   isSettled                 Boolean   @default(false)
   confirmedAt               DateTime?
   note                      String?
+  
   orderLine                 OrderLine @relation(fields: [orderLineId], references: [id])
   @@index([targetMonth])
 }
@@ -195,7 +252,7 @@ model SalesLedger {
 model OrderAdjustment {
   id          Int       @id @default(autoincrement())
   orderLineId Int
-  type        String
+  type        String    // 예: "반품수수료", "추가배송비"
   amount      Decimal
   description String?
   orderLine   OrderLine @relation(fields: [orderLineId], references: [id])
