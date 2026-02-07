@@ -1,14 +1,183 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// [1] 채널 & ST/DT 설정
+enum SalesGroup {
+  ST
+  DT
+}
+
+enum SettlementTrigger {
+  ON_ORDER_CREATED
+  ON_PO_CREATED
+  ON_SHIPPED
+}
+
+model SalesChannelType {
+  id          Int            @id @default(autoincrement())
+  name        String         @unique
+  group       SalesGroup
+  description String?
+  businessRoles BusinessRole[]
+}
+
+model BusinessRole {
+  id                Int                  @id @default(autoincrement())
+  businessName      String
+  channelTypeId     Int
+  channelType       SalesChannelType     @relation(fields: [channelTypeId], references: [id])
+  settlementTrigger SettlementTrigger    @default(ON_SHIPPED)
+  
+  isSalesChannel    Boolean              @default(false)
+  isSupplier        Boolean              @default(false)
+  isWarehouse       Boolean              @default(false)
+  
+  settlementAdjustments SettlementAdjustment[]
+}
+
+// [2] 상품 관리
+model DbProduct {
+  id               Int       @id @default(autoincrement())
+  dbCode           String    @unique
+  name             String
+  purchaseCost     Decimal?
+  isBundle         Boolean   @default(false)
+  referenceId      Int?
+  referenceProduct DbProduct? @relation("ReferenceProduct", fields: [referenceId], references: [id])
+  variants         DbProduct[] @relation("ReferenceProduct")
+  status           String    @default("ACTIVE")
+  
+  salesMappings      SalesProductMapping[]
+  warehouseStocks    WarehouseStock[]
+  priceHistory       DbProductPriceHistory[]
+  supplierOrderItems SupplierOrderItem[]
+  OrderLine          OrderLine[]           @relation("SalesLink")
+}
+
+model DbProductPriceHistory {
+  id          Int       @id @default(autoincrement())
+  dbProductId Int
+  startDate   DateTime
+  endDate     DateTime?
+  costPrice   Decimal
+  dbProduct   DbProduct @relation(fields: [dbProductId], references: [id])
+}
+
+model SalesProductMapping {
+  id               Int       @id @default(autoincrement())
+  clientRoleId     Int
+  salesProductCode String
+  salesOptionName  String
+  dbProductId      Int
+  dbProduct        DbProduct @relation(fields: [dbProductId], references: [id])
+  @@unique([clientRoleId, salesProductCode, salesOptionName], name: "unique_mapping")
+}
+
+// [3] 주문 및 운영
+enum OrderType {
+  NORMAL
+  EXCHANGE_T
+  CARRY_OVER_RETURN
+}
+
+model OrderUploadBatch {
+  id               Int         @id @default(autoincrement())
+  clientRoleId     Int
+  originalFileName String
+  uploadedAt       DateTime    @default(now())
+  orderLines       OrderLine[]
+}
+
+model OrderLine {
+  id               Int        @id @default(autoincrement())
+  batchId          Int
+  batch            OrderUploadBatch @relation(fields: [batchId], references: [id])
+  externalOrderNo  String
+  systemOrderNo    String?    @unique
+  orderType        OrderType  @default(NORMAL)
+  
+  salesProductCode String
+  salesProductName String?
+  salesOptionName  String?
+  quantity         Int
+  
+  mappedDbProductId Int?
+  mappedDbProduct   DbProduct? @relation("SalesLink", fields: [mappedDbProductId], references: [id])
+  isSettled        Boolean    @default(false)
+  
+  adjustments        OrderAdjustment[]
+  supplierOrderItems SupplierOrderItem[]
+  salesLedger        SalesLedger?
+  parentLineId     Int?
+  parentLine       OrderLine?  @relation("LineSplit", fields: [parentLineId], references: [id])
+  childLines       OrderLine[] @relation("LineSplit")
+}
+
+// [4] 물류/매입
+model SupplierOrderItem {
+  id              Int       @id @default(autoincrement())
+  dbProductId     Int
+  dbProduct       DbProduct @relation(fields: [dbProductId], references: [id])
+  quantity        Int
+  baseUnitCost    Decimal?
+  orderLineId     Int?
+  orderLine       OrderLine? @relation(fields: [orderLineId], references: [id])
+  purchaseLedger  PurchaseLedger?
+}
+
+model WarehouseStock {
+  id          Int       @id @default(autoincrement())
+  dbProductId Int
+  quantity    Int       @default(0)
+  badQuantity Int       @default(0)
+  dbProduct   DbProduct @relation(fields: [dbProductId], references: [id])
+}
+
+// [5] 정산
+model SalesLedger {
+  id                        Int       @id @default(autoincrement())
+  orderLineId               Int       @unique
+  targetMonth               String
+  confirmedSalePrice        Decimal?
+  confirmedSupplyPrice      Decimal?
+  confirmedCommission       Decimal?
+  confirmedTaxInvoiceAmount Decimal?
+  returnFee                 Decimal   @default(0)
+  isSettled                 Boolean   @default(false)
+  confirmedAt               DateTime?
+  note                      String?
+  orderLine                 OrderLine @relation(fields: [orderLineId], references: [id])
+  @@index([targetMonth])
+}
+
+model OrderAdjustment {
+  id          Int       @id @default(autoincrement())
+  orderLineId Int
+  type        String
+  amount      Decimal
+  description String?
+  orderLine   OrderLine @relation(fields: [orderLineId], references: [id])
+}
+
+model SettlementAdjustment {
+  id             Int           @id @default(autoincrement())
+  businessRoleId Int?
+  targetMonth    String
+  amount         Decimal
+  reason         String
+  businessRole   BusinessRole? @relation(fields: [businessRoleId], references: [id])
+}
+
+model PurchaseLedger {
+  id                  Int               @id @default(autoincrement())
+  supplierOrderItemId Int               @unique
+  targetMonth         String
+  confirmedUnitCost   Decimal?
+  supplierOrderItem   SupplierOrderItem @relation(fields: [supplierOrderItemId], references: [id])
 }
