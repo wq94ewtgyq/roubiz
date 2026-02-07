@@ -1,46 +1,40 @@
-// src/product/product.controller.ts
 import { Controller, Get, Post, Body, Patch, Param, Delete } from '@nestjs/common';
 import { ProductService } from './product.service';
-import { ApiProperty } from '@nestjs/swagger'; // 스웨거용 명찰 도구
+import { CreateProductDto } from './dto/create-product.dto';
+import { UpdateProductDto } from './dto/update-product.dto';
+import { ApiTags, ApiOperation } from '@nestjs/swagger';
 
-// [1] 데이터 명세서(DTO) 만들기: 스웨거가 이걸 보고 예시를 만들어줍니다.
-class CreateProductDto {
-  @ApiProperty({ example: '루트바이 블랙마카 100포', description: '상품명' })
-  name: string;
-
-  @ApiProperty({ example: 'R10001', description: 'DB 관리코드' })
-  dbCode: string;
-
-  @ApiProperty({ example: 15000, description: '매입원가', required: false })
-  purchaseCost?: number;
-}
-
+@ApiTags('Product (상품 마스터)')
 @Controller('product')
 export class ProductController {
   constructor(private readonly productService: ProductService) {}
 
   @Post()
-  // [2] Body에 위에서 만든 명세서(CreateProductDto)를 적용합니다.
-  create(@Body() body: CreateProductDto) {
-    return this.productService.create(body);
+  @ApiOperation({ summary: '신규 상품 등록 (단품/세트)' })
+  create(@Body() createProductDto: CreateProductDto) {
+    return this.productService.create(createProductDto);
   }
 
   @Get()
+  @ApiOperation({ summary: '전체 상품 목록 조회' })
   findAll() {
     return this.productService.findAll();
   }
 
   @Get(':id')
+  @ApiOperation({ summary: '상품 상세 조회' })
   findOne(@Param('id') id: string) {
     return this.productService.findOne(+id);
   }
 
   @Patch(':id')
-  update(@Param('id') id: string, @Body() body: any) {
-    return this.productService.update(+id, body);
+  @ApiOperation({ summary: '상품 정보 수정' })
+  update(@Param('id') id: string, @Body() updateProductDto: UpdateProductDto) {
+    return this.productService.update(+id, updateProductDto);
   }
 
   @Delete(':id')
+  @ApiOperation({ summary: '상품 삭제' })
   remove(@Param('id') id: string) {
     return this.productService.remove(+id);
   }
