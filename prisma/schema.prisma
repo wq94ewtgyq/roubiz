@@ -20,10 +20,10 @@ enum SettlementTrigger {
 }
 
 model SalesChannelType {
-  id          Int            @id @default(autoincrement())
-  name        String         @unique
-  group       SalesGroup
-  description String?
+  id            Int            @id @default(autoincrement())
+  name          String         @unique
+  group         SalesGroup
+  description   String?
   businessRoles BusinessRole[]
 }
 
@@ -39,6 +39,9 @@ model BusinessRole {
   isWarehouse       Boolean              @default(false)
   
   settlementAdjustments SettlementAdjustment[]
+
+  // [NEW] 정산 로직을 위해 주문 묶음(Batch)과 연결
+  batches           OrderUploadBatch[] 
 }
 
 // [2] 상품 관리
@@ -92,6 +95,9 @@ model OrderUploadBatch {
   originalFileName String
   uploadedAt       DateTime    @default(now())
   orderLines       OrderLine[]
+  
+  // [NEW] 비즈니스 역할(채널)과 연결
+  businessRole     BusinessRole @relation(fields: [clientRoleId], references: [id])
 }
 
 model OrderLine {
