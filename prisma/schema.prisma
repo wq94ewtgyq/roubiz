@@ -38,10 +38,14 @@ model BusinessRole {
   isSupplier        Boolean              @default(false)
   isWarehouse       Boolean              @default(false)
   
+  batches               OrderUploadBatch[]
   settlementAdjustments SettlementAdjustment[]
+  
+  // [NEW] 판매처로서의 상품 매핑 (매출 상품)
+  salesProductMappings  SalesProductMapping[]
 
-  // [NEW] 정산 로직을 위해 주문 묶음(Batch)과 연결
-  batches           OrderUploadBatch[] 
+  // [NEW] 공급처로서의 상품 정보 (매입 상품)
+  suppliedProducts      PurchaseProduct[]
 }
 
 // [2] 상품 관리
@@ -61,6 +65,9 @@ model DbProduct {
   priceHistory       DbProductPriceHistory[]
   supplierOrderItems SupplierOrderItem[]
   OrderLine          OrderLine[]           @relation("SalesLink")
+
+  // [NEW] 이 상품을 취급하는 매입처 정보들
+  purchaseProducts   PurchaseProduct[]
 }
 
 model DbProductPriceHistory {
@@ -72,14 +79,39 @@ model DbProductPriceHistory {
   dbProduct   DbProduct @relation(fields: [dbProductId], references: [id])
 }
 
+// [2-1] 매출 상품 (Sales Product) - 판매처 코드와 우리 코드 연결
 model SalesProductMapping {
-  id               Int       @id @default(autoincrement())
+  id               Int          @id @default(autoincrement())
   clientRoleId     Int
+  clientRole       BusinessRole @relation(fields: [clientRoleId], references: [id]) // [UPGRADE] 관계 연결
+  
   salesProductCode String
   salesOptionName  String
+  
   dbProductId      Int
-  dbProduct        DbProduct @relation(fields: [dbProductId], references: [id])
+  dbProduct        DbProduct    @relation(fields: [dbProductId], references: [id])
+  
   @@unique([clientRoleId, salesProductCode, salesOptionName], name: "unique_mapping")
+}
+
+// [2-2] 매입 상품 (Purchase Product) - 공급처 코드와 매입 단가 관리 [NEW]
+model PurchaseProduct {
+  id                  Int          @id @default(autoincrement())
+  supplierId          Int
+  supplier            BusinessRole @relation(fields: [supplierId], references: [id])
+  
+  dbProductId         Int
+  dbProduct           DbProduct    @relation(fields: [dbProductId], references: [id])
+  
+  supplierProductCode String?      // 공급처에서 쓰는 상품코드
+  supplierProductName String?      // 공급처에서 쓰는 상품명
+  costPrice           Decimal      // 매입 단가 (Cost)
+  isPrimary           Boolean      @default(false) // 주 거래처 여부
+
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  @@unique([supplierId, dbProductId]) // 같은 공급처에 같은 상품 중복 등록 방지
 }
 
 // [3] 주문 및 운영
@@ -92,12 +124,10 @@ enum OrderType {
 model OrderUploadBatch {
   id               Int         @id @default(autoincrement())
   clientRoleId     Int
+  businessRole     BusinessRole @relation(fields: [clientRoleId], references: [id])
   originalFileName String
   uploadedAt       DateTime    @default(now())
   orderLines       OrderLine[]
-  
-  // [NEW] 비즈니스 역할(채널)과 연결
-  businessRole     BusinessRole @relation(fields: [clientRoleId], references: [id])
 }
 
 model OrderLine {
