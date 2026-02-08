@@ -4,7 +4,7 @@ import { PrismaClient } from '@prisma/client';
 
 export class CreateSupplierProductDto {
   supplierName: string;      
-  roubizCode: string; // [수정] dbProductCode -> roubizCode
+  roubizCode: string; 
   supplierProductCode?: string;
   supplierProductName?: string;
   costPrice: number;
@@ -16,12 +16,13 @@ const prisma = new PrismaClient();
 export class SupplierProductService { 
 
   async create(dto: CreateSupplierProductDto) {
+    // 1. 루비즈 상품 확인
     const roubizProduct = await prisma.roubizProduct.findUnique({
-      where: { roubizCode: dto.roubizCode }, // [수정] roubizCode
+      where: { roubizCode: dto.roubizCode }, 
     });
-    
     if (!roubizProduct) throw new NotFoundException(`상품(${dto.roubizCode}) 없음`);
 
+    // 2. 공급처 확인
     let supplier = await prisma.businessRole.findUnique({
       where: { businessName: dto.supplierName },
     });
@@ -32,11 +33,11 @@ export class SupplierProductService {
           businessName: dto.supplierName,
           isSupplier: true,
           clientGroup: 'DT', 
-          description: 'Auto-generated Supplier',
         },
       });
     }
 
+    // 3. 중복 확인 (Prisma 유니크 키 규칙 적용)
     const existing = await prisma.supplierProduct.findUnique({
       where: {
         supplierId_roubizProductId: { 
@@ -45,9 +46,10 @@ export class SupplierProductService {
         },
       },
     });
-    if (existing) throw new BadRequestException('이미 등록된 상품입니다.');
+    if (existing) throw new BadRequestException('이미 등록된 공급처 상품입니다.');
 
-    const newProduct = await prisma.supplierProduct.create({
+    // 4. 저장
+    return await prisma.supplierProduct.create({
       data: {
         supplierId: supplier.id,
         roubizProductId: roubizProduct.id, 
@@ -57,8 +59,6 @@ export class SupplierProductService {
         isPrimary: true,
       },
     });
-
-    return newProduct;
   }
 
   async findAll() {
