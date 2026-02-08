@@ -1,4 +1,3 @@
-// src/order/order.controller.ts
 import { Controller, Post, Get, Delete, Param, UseInterceptors, UploadedFile, Body, BadRequestException, Res } from '@nestjs/common';
 import type { Response } from 'express'; 
 import { OrderService } from './order.service';
@@ -37,14 +36,12 @@ export class OrderController {
     return this.orderService.confirmOrders(ids);
   }
 
-  // [NEW] 대시보드 조회 (3개 탭 데이터)
   @Get('dashboard')
   @ApiOperation({ summary: '발주 관제 대시보드 조회 (대기/보류/지정일 분류)' })
   getDashboard() {
     return this.orderService.getDispatchDashboard();
   }
 
-  // [NEW] 보류 처리 (수동 / 다음차수)
   @Post('hold-request')
   @ApiOperation({ summary: '발주 보류 설정 (사유 필수)' })
   @ApiBody({ 
@@ -61,7 +58,6 @@ export class OrderController {
     return this.orderService.setHoldStatus({ ids: body.roubizOrderIds, reason: body.reason, type: body.type });
   }
 
-  // [NEW] 지정일 설정
   @Post('schedule-request')
   @ApiOperation({ summary: '지정일 배송 설정 (사유 필수)' })
   @ApiBody({ 
@@ -157,7 +153,7 @@ export class OrderController {
         file: {
           type: 'string',
           format: 'binary',
-          description: '파일명에 판매처명(예: 쿠팡) 필수 포함',
+          description: '파일명에 Client명(예: 쿠팡) 필수 포함',
         },
       },
     },
@@ -165,17 +161,18 @@ export class OrderController {
   async uploadExcel(@UploadedFile() file: Express.Multer.File) {
     const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
     
-    const channels = await prisma.salesChannel.findMany();
-    const matchedChannel = channels.find(c => originalName.includes(c.name));
+    // [변경] SalesChannel -> Client
+    const clients = await prisma.client.findMany();
+    const matchedClient = clients.find(c => originalName.includes(c.name));
 
-    if (!matchedChannel) {
-      throw new BadRequestException(`❌ 파일명(${originalName})에서 판매처를 인식할 수 없습니다. (등록된 채널: ${channels.map(c => c.name).join(', ')})`);
+    if (!matchedClient) {
+      throw new BadRequestException(`❌ 파일명(${originalName})에서 Client(판매처)를 인식할 수 없습니다. (등록된 Client: ${clients.map(c => c.name).join(', ')})`);
     }
 
     const rows = this.excelService.readExcel(file.buffer);
     const results: any[] = []; 
 
-    const mapping = (matchedChannel.excelMapping as any) || {
+    const mapping = (matchedClient.excelMapping as any) || {
         orderNo: '주문번호',
         productCode: '상품코드',
         optionName: '옵션명',
@@ -185,7 +182,7 @@ export class OrderController {
 
     for (const row of rows) {
       const dto = new CreateOrderDto();
-      dto.channelName = matchedChannel.name; 
+      dto.channelName = matchedClient.name; // Service에서 Client 조회용으로 사용
       
       dto.orderNo = row[mapping.orderNo] ? String(row[mapping.orderNo]) : `AUTO-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
       dto.productCode = row[mapping.productCode] ? String(row[mapping.productCode]) : 'UNKNOWN';
@@ -207,11 +204,51 @@ export class OrderController {
     }
 
     return {
-      message: `[${matchedChannel.name}] 업로드 완료`,
+      message: `[${matchedClient.name}] 업로드 완료`,
       total: rows.length,
       successCount: results.filter(r => r.status === 'SUCCESS').length,
       details: results
     };
+  }
+
+  // [10. 통합 운송장 업로드 API]
+  @Post('upload-waybill')
+  @ApiOperation({ summary: '통합 운송장 업로드 (행동: 등록/수정/삭제)' })
+  @ApiConsumes('multipart/form-data')
+  @UseInterceptors(FileInterceptor('file'))
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', format: 'binary' }
+      }
+    }
+  })
+  async uploadWaybill(@UploadedFile() file: Express.Multer.File) {
+    return this.orderService.uploadWaybill(file.buffer);
+  }
+
+  // [11. Client용 운송장 회신 (엑셀 다운로드)]
+  @Post('download-waybill')
+  @ApiOperation({ summary: 'Client 회신용 운송장 엑셀 다운로드' })
+  @ApiBody({ 
+    schema: { 
+      type: 'object', 
+      properties: { 
+        clientId: { type: 'number' },
+        roubizOrderIds: { type: 'array', items: { type: 'number' } } 
+      } 
+    } 
+  })
+  async downloadWaybill(@Body() body: { clientId: number, roubizOrderIds: number[] }, @Res() res: Response) {
+    const result = await this.orderService.downloadWaybillForClient(body.clientId, body.roubizOrderIds);
+    
+    const encodedFileName = encodeURIComponent(result.filename);
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="${encodedFileName}"`,
+    });
+    res.send(result.buffer);
   }
 
   @Get()

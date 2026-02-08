@@ -2,25 +2,29 @@ import { Injectable, NotFoundException, BadRequestException } from '@nestjs/comm
 import { CreateOrderDto } from './dto/create-order.dto';
 import { CreateSupplierOrderDto } from './dto/create-supplier-order.dto';
 import { PrismaClient, RoubizOrder, SupplierOrder } from '@prisma/client';
+import { ExcelService } from '../common/excel.service'; 
+
+// ⚠️ 주의: 여기에 'import { OrderService } ...' 가 있으면 절대 안 됩니다! (삭제됨)
 
 const prisma = new PrismaClient();
 
 @Injectable()
 export class OrderService {
-  
+  constructor(private readonly excelService: ExcelService) {} 
+
   // [1. 수주 등록]
   async create(dto: CreateOrderDto) {
     const safeOption = dto.optionName?.trim() || '옵션없음';
 
-    const channel = await prisma.salesChannel.findFirst({
+    const client = await prisma.client.findFirst({
       where: { name: dto.channelName },
     });
     
-    if (!channel) throw new NotFoundException(`'${dto.channelName}' 판매처를 찾을 수 없습니다.`);
+    if (!client) throw new NotFoundException(`'${dto.channelName}' Client(판매처)를 찾을 수 없습니다.`);
 
     const clientOrder = await prisma.clientOrder.create({
       data: {
-        salesChannelId: channel.id,
+        clientId: client.id,
         clientOrderNo: dto.orderNo,
         productCode: dto.productCode,
         optionName: safeOption,
@@ -33,8 +37,8 @@ export class OrderService {
 
     const mapping = await prisma.clientProductMapping.findUnique({
       where: {
-        channel_product_option: { 
-          salesChannelId: channel.id,
+        client_product_option: { 
+          clientId: client.id,
           clientProductCode: dto.productCode,
           clientOptionName: safeOption
         }
@@ -55,7 +59,7 @@ export class OrderService {
           roubizProductId: mapping.roubizProductId,
           quantity: dto.quantity,
           status: 'PENDING',
-          targetOrderDate: new Date() // 기본값: 오늘
+          targetOrderDate: new Date() 
         }
       });
 
@@ -80,13 +84,13 @@ export class OrderService {
       where: { id: { in: roubizOrderIds }, status: 'PENDING' },
       data: { 
         status: 'READY',
-        targetOrderDate: new Date() // 확정 시 즉시 발주 대상으로 설정
+        targetOrderDate: new Date() 
       }
     });
     return { count: result.count, message: `${result.count}건 확정 완료` };
   }
 
-  // [3. 보류 처리 (수동 보류 & 다음 차수 넘기기 통합)]
+  // [3. 보류 처리]
   async setHoldStatus(dto: { ids: number[], reason: string, type: 'MANUAL' | 'NEXT_ROUND' }) {
     if (!dto.ids || dto.ids.length === 0) throw new BadRequestException('선택된 주문이 없습니다.');
     if (!dto.reason) throw new BadRequestException('보류 사유는 필수입니다.');
@@ -96,9 +100,9 @@ export class OrderService {
     const result = await prisma.roubizOrder.updateMany({
       where: { id: { in: dto.ids } },
       data: {
-        status: 'HOLD',          // 상태는 HOLD
-        holdReason: dto.reason,  // 사유 저장
-        isNextRound: isNextRound // 다음 차수 여부 플래그
+        status: 'HOLD',          
+        holdReason: dto.reason,  
+        isNextRound: isNextRound 
       }
     });
 
@@ -114,7 +118,7 @@ export class OrderService {
 
     const targetDate = new Date(date);
     const now = new Date();
-    // 미래 날짜면 SCHEDULED, 오늘/과거면 READY
+    
     const newStatus = targetDate > now ? 'SCHEDULED' : 'READY';
 
     const result = await prisma.roubizOrder.updateMany({
@@ -129,7 +133,7 @@ export class OrderService {
     return { message: `${result.count}건의 발주 예정일이 변경되었습니다.` };
   }
 
-  // [5. 발주 관제 대시보드 (3개 탭 데이터 분리)]
+  // [5. 발주 관제 대시보드]
   async getDispatchDashboard() {
     const endOfToday = new Date();
     endOfToday.setHours(23, 59, 59, 999);
@@ -140,12 +144,11 @@ export class OrderService {
       },
       include: {
         roubizProduct: true,
-        clientOrder: { include: { salesChannel: true } }
+        clientOrder: { include: { client: true } }
       },
       orderBy: { targetOrderDate: 'asc' }
     });
 
-    // [핵심 수정] TypeScript에게 배열에 들어갈 데이터 타입을 명시합니다.
     type OrderType = typeof allOrders[0];
 
     const dashboard: {
@@ -153,9 +156,9 @@ export class OrderService {
       hold: OrderType[];
       scheduled: OrderType[];
     } = {
-      ready: [],      // [발주대기]
-      hold: [],       // [발주보류] (수동 + 다음차수)
-      scheduled: []   // [지정일배송]
+      ready: [],      
+      hold: [],       
+      scheduled: []   
     };
 
     for (const order of allOrders) {
@@ -171,9 +174,8 @@ export class OrderService {
     return dashboard;
   }
 
-  // [6. 발주 생성 (다음 차수 자동 복귀 로직 포함)]
+  // [6. 발주 생성]
   async createSupplierOrders(dto: CreateSupplierOrderDto) {
-    // 1. 발주 대상 조회
     const orders = await prisma.roubizOrder.findMany({
       where: { id: { in: dto.roubizOrderIds }, status: 'READY' },
       include: {
@@ -188,7 +190,6 @@ export class OrderService {
 
     if (orders.length === 0) throw new NotFoundException('발주 가능한 주문이 없습니다.');
 
-    // 2. 발주서 생성 로직
     const supplierBatches = new Map<number, any[]>();
 
     for (const order of orders) {
@@ -254,24 +255,19 @@ export class OrderService {
       createdOrders.push(newSupplierOrder);
     }
 
-    // 3. 상태 업데이트 (ORDERED)
     await prisma.roubizOrder.updateMany({
       where: { id: { in: dto.roubizOrderIds }, status: 'READY' },
       data: { status: 'ORDERED' }
     });
 
-    // =========================================================
-    // [핵심] "다음 차수로 넘기기" 설정된 주문들 자동 복귀
-    // =========================================================
     await prisma.roubizOrder.updateMany({
       where: {
         status: 'HOLD',
         isNextRound: true
       },
       data: {
-        status: 'READY',      // 다시 대기 상태로
-        isNextRound: false,   // 플래그 초기화
-        // holdReason: null   // 사유는 기록용으로 남김 (필요 시 주석 해제)
+        status: 'READY',
+        isNextRound: false,
       }
     });
 
@@ -315,6 +311,143 @@ export class OrderService {
 
     if (!order) throw new NotFoundException('해당 발주서를 찾을 수 없습니다.');
     return order;
+  }
+
+  // [10. 통합 운송장 업로드 (행동 기반)]
+  async uploadWaybill(fileBuffer: Buffer) {
+    const rows = this.excelService.readExcel(fileBuffer);
+    const results: any[] = [];
+
+    for (const row of rows) {
+      const action = String(row['행동'] || '').trim(); 
+      const orderNo = String(row['발주번호'] || '').trim(); 
+      const carrierName = String(row['택배사명'] || '').trim();
+      let trackingNo = String(row['운송장번호'] || '').trim();
+
+      trackingNo = trackingNo.replace(/[^a-zA-Z0-9]/g, '');
+
+      try {
+        const order = await prisma.roubizOrder.findUnique({
+          where: { roubizOrderNo: orderNo },
+        });
+
+        if (!order) {
+            results.push({ orderNo, status: 'FAIL', msg: '주문번호 없음' });
+            continue;
+        }
+
+        let carrierId: number | null = null;
+        if (carrierName && action !== '삭제') {
+           const mapping = await prisma.carrierMapping.findUnique({ where: { alias: carrierName } });
+           if (mapping) {
+             carrierId = mapping.carrierId;
+           } else {
+             const standard = await prisma.carrier.findFirst({ where: { name: carrierName } });
+             if (standard) carrierId = standard.id;
+             else throw new Error(`시스템에 등록되지 않은 택배사명(${carrierName})`);
+           }
+        }
+
+        if (action === '등록') {
+          if (order.trackingNumber) {
+             if (order.trackingNumber === trackingNo) {
+                 results.push({ orderNo, status: 'SKIP', msg: '동일 운송장 이미 존재' });
+                 continue;
+             }
+             throw new Error(`이미 운송장(${order.trackingNumber})이 존재함. '수정' 모드 사용 필요.`);
+          }
+          
+          await prisma.roubizOrder.update({
+            where: { id: order.id },
+            data: {
+              carrierId,
+              trackingNumber: trackingNo,
+              status: 'SHIPPING',
+              shippedAt: new Date()
+            }
+          });
+          results.push({ orderNo, status: 'SUCCESS', msg: '등록 완료' });
+
+        } else if (action === '수정') {
+          await prisma.roubizOrder.update({
+            where: { id: order.id },
+            data: {
+              carrierId: carrierId || order.carrierId,
+              trackingNumber: trackingNo,
+              status: 'SHIPPING',
+              shippedAt: new Date()
+            }
+          });
+          results.push({ orderNo, status: 'SUCCESS', msg: '수정 완료' });
+
+        } else if (action === '삭제') {
+          await prisma.roubizOrder.update({
+            where: { id: order.id },
+            data: {
+              carrierId: null,
+              trackingNumber: null,
+              status: 'ORDERED',
+              shippedAt: null
+            }
+          });
+          results.push({ orderNo, status: 'SUCCESS', msg: '삭제 완료' });
+
+        } else {
+          throw new Error(`알 수 없는 행동: ${action}`);
+        }
+
+      } catch (e) {
+        results.push({ orderNo, status: 'FAIL', msg: e.message });
+      }
+    }
+
+    return { total: rows.length, results };
+  }
+
+  // [11. Client용 운송장 회신 (엑셀 다운로드)]
+  async downloadWaybillForClient(clientId: number, orderIds: number[]) {
+    const client = await prisma.client.findUnique({
+      where: { id: clientId },
+    });
+    if (!client) throw new NotFoundException('Client(판매처)를 찾을 수 없습니다.');
+
+    const orders = await prisma.roubizOrder.findMany({
+      where: {
+        id: { in: orderIds },
+        status: 'SHIPPING', 
+        clientOrder: { clientId: clientId }
+      },
+      include: {
+        clientOrder: true,
+        carrier: true
+      }
+    });
+
+    if (orders.length === 0) throw new NotFoundException('출력할 배송 중인 주문이 없습니다.');
+
+    const format = client.waybillFormat as Record<string, string> || {
+      '주문번호': 'clientOrder.clientOrderNo',
+      '택배사': 'carrier.name',
+      '송장번호': 'trackingNumber'
+    };
+
+    const excelData = orders.map(order => {
+      const row: any = {};
+      for (const [header, keyPath] of Object.entries(format)) {
+        const keys = keyPath.split('.');
+        let value: any = order;
+        for (const k of keys) {
+          value = value ? value[k] : '';
+        }
+        row[header] = value;
+      }
+      return row;
+    });
+
+    return {
+      buffer: this.excelService.writeExcel(excelData),
+      filename: `${client.name}_운송장등록_${new Date().toISOString().slice(0,10)}.xlsx`
+    };
   }
 
   async findAll() {

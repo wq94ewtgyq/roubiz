@@ -19,22 +19,26 @@ model Business {
   bizNumber    String?  
   ownerName    String?  
   
-  salesChannels SalesChannel[]
-  suppliers     Supplier[]
-  warehouses    Warehouse[]
+  clients      Client[]    // [변경] SalesChannel -> Client
+  suppliers    Supplier[]
+  warehouses   Warehouse[]
 }
 
-model SalesChannel {
-  id           Int      @id @default(autoincrement())
-  businessId   Int
-  business     Business @relation(fields: [businessId], references: [id])
+// [변경] SalesChannel -> Client (판매처/고객사)
+model Client {
+  id            Int      @id @default(autoincrement())
+  businessId    Int
+  business      Business @relation(fields: [businessId], references: [id])
   
-  name         String   // 예: 쿠팡, 네이버
-  code         String?  
-  excelMapping Json?    // 엑셀 양식 설정
+  name          String   // 예: 쿠팡, 네이버, 자사몰
+  code          String?  
+  excelMapping  Json?    // 업로드 엑셀 양식 설정
+  
+  // [운송장 회신 양식]
+  waybillFormat Json?    // 예: { "주문번호": "clientOrder.clientOrderNo", ... }
 
-  orders       ClientOrder[]
-  mappings     ClientProductMapping[]
+  orders        ClientOrder[]
+  mappings      ClientProductMapping[]
 }
 
 model Supplier {
@@ -101,15 +105,15 @@ model ProductBundle {
 
 model ClientProductMapping {
   id                Int           @id @default(autoincrement())
-  salesChannelId    Int           
-  salesChannel      SalesChannel  @relation(fields: [salesChannelId], references: [id])
+  clientId          Int           // [변경] salesChannelId -> clientId
+  client            Client        @relation(fields: [clientId], references: [id])
   
   clientProductCode String        
   clientOptionName  String        
   roubizProductId   Int
   roubizProduct     RoubizProduct @relation(fields: [roubizProductId], references: [id])
   
-  @@unique([salesChannelId, clientProductCode, clientOptionName], name: "channel_product_option")
+  @@unique([clientId, clientProductCode, clientOptionName], name: "client_product_option")
 }
 
 model SupplierProduct {
@@ -132,8 +136,8 @@ model SupplierProduct {
 
 model ClientOrder {
   id             Int          @id @default(autoincrement())
-  salesChannelId Int          
-  salesChannel   SalesChannel @relation(fields: [salesChannelId], references: [id])
+  clientId       Int          // [변경] salesChannelId -> clientId
+  client         Client       @relation(fields: [clientId], references: [id])
   
   clientOrderNo  String   
   productCode    String   
@@ -154,12 +158,18 @@ model RoubizOrder {
   roubizProductId Int
   roubizProduct   RoubizProduct @relation(fields: [roubizProductId], references: [id])
   quantity        Int           
-  status          String        @default("PENDING") // PENDING, READY, ORDERED, HOLD, SCHEDULED
+  status          String        @default("PENDING") // PENDING, READY, ORDERED, HOLD, SCHEDULED, SHIPPING
   
-  // [NEW] 발주 관제 필드
-  targetOrderDate DateTime?     @default(now())     // 발주 예정일
-  holdReason      String?       // 보류/지정일 사유
-  isNextRound     Boolean       @default(false)     // 다음 차수 자동 복귀 여부
+  // [발주 관제 필드]
+  targetOrderDate DateTime?     @default(now())     
+  holdReason      String?       
+  isNextRound     Boolean       @default(false)     
+
+  // [배송 정보]
+  carrierId       Int?
+  carrier         Carrier?      @relation(fields: [carrierId], references: [id])
+  trackingNumber  String?       
+  shippedAt       DateTime?     
 
   createdAt       DateTime      @default(now())
 }
@@ -196,4 +206,26 @@ model WarehouseStock {
   quantity        Int           @default(0)
 
   @@unique([warehouseId, roubizProductId], name: "warehouse_product_stock")
+}
+
+// ======================================================
+// [5] 택배사 및 배송 관리
+// ======================================================
+
+model Carrier {
+  id        Int              @id @default(autoincrement())
+  code      String           @unique 
+  name      String           
+  type      String           @default("PARCEL") 
+  active    Boolean          @default(true)
+  
+  mappings  CarrierMapping[] 
+  orders    RoubizOrder[]
+}
+
+model CarrierMapping {
+  id        Int      @id @default(autoincrement())
+  carrierId Int
+  carrier   Carrier  @relation(fields: [carrierId], references: [id])
+  alias     String   @unique 
 }

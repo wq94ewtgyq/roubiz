@@ -4,74 +4,120 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log('🌱 새로운 계층 구조로 시드 데이터를 생성합니다...');
+  console.log('🌱 초기 데이터 시딩 시작...');
 
-  // 1. 최상위 사업자 (Business)
-  const myBiz = await prisma.business.upsert({
-    where: { businessName: '(주)루비즈' },
+  // 1. Business(본사) 생성 (Upsert: 있으면 유지, 없으면 생성)
+  const biz = await prisma.business.upsert({
+    where: { businessName: '루트바이 본사' },
     update: {},
-    create: {
-      businessName: '(주)루비즈',
-      ownerName: '김서늬',
-    },
+    create: { businessName: '루트바이 본사', ownerName: '김서늬' }
   });
 
-  // 2. 판매처 (SalesChannel) - 엑셀 양식 포함
-  const coupang = await prisma.salesChannel.create({
-    data: {
-      businessId: myBiz.id,
-      name: '쿠팡',
-      code: 'CP01',
-      excelMapping: {
-        orderNo: '주문번호',
-        productCode: '등록상품명', // 엑셀에서 찾을 헤더명
-        optionName: '등록옵션명',
-        qty: '구매수량',
-        price: '판매가'
+  // 2. Client(판매처) 생성 (중복 체크 후 생성)
+  // Client 테이블의 name은 unique가 아닐 수 있으므로 findFirst로 확인
+  let client = await prisma.client.findFirst({ 
+    where: { name: '테스트스토어' } 
+  });
+
+  if (!client) {
+    client = await prisma.client.create({
+      data: {
+        businessId: biz.id,
+        name: '테스트스토어',
+        code: 'TEST_001',
+        waybillFormat: { 
+          "주문번호": "clientOrder.clientOrderNo", 
+          "택배사": "carrier.name", 
+          "송장번호": "trackingNumber" 
+        } 
+      }
+    });
+    console.log(` - Client 생성됨: ${client.name}`);
+  } else {
+    console.log(` - Client 이미 존재함: ${client.name}`);
+  }
+
+  // 3. 택배사 및 매핑 등록 (Upsert 사용)
+  
+  // 3-1. CJ대한통운
+  await prisma.carrier.upsert({
+    where: { code: 'CJ' },
+    update: {}, // 이미 있으면 아무것도 안 함
+    create: {
+      code: 'CJ',
+      name: 'CJ대한통운',
+      type: 'PARCEL',
+      mappings: {
+        create: [
+          { alias: 'CJ택배' },
+          { alias: '대한통운' },
+          { alias: 'cj' }
+        ]
       }
     }
   });
 
-  // 3. 매입처 (Supplier)
-  const factoryA = await prisma.supplier.create({
-    data: {
-      businessId: myBiz.id,
-      name: '김씨공장',
-      orderFormat: { type: 'STANDARD_PDF' }
+  // 3-2. 우체국택배
+  await prisma.carrier.upsert({
+    where: { code: 'POST' },
+    update: {},
+    create: {
+      code: 'POST',
+      name: '우체국택배',
+      type: 'PARCEL',
+      mappings: {
+        create: [
+          { alias: '우체국' },
+          { alias: 'epost' }
+        ]
+      }
     }
   });
 
-  // 4. 상품 생성
-  const singleItem = await prisma.roubizProduct.create({
-    data: {
-      roubizCode: 'R-S001',
-      name: '블랙마카 단품',
-      standardCost: 5000,
-      isSet: false,
-    },
-  });
-
-  // 5. 매핑 연결 (판매처 <-> 루비즈상품)
-  await prisma.clientProductMapping.create({
-    data: {
-      salesChannelId: coupang.id,
-      clientProductCode: 'A001',
-      clientOptionName: '기본',
-      roubizProductId: singleItem.id,
-    },
-  });
-
-  // 6. 매입처 상품 연결
-  await prisma.supplierProduct.create({
-    data: {
-      supplierId: factoryA.id,
-      roubizProductId: singleItem.id,
-      costPrice: 4800,
-      isPrimary: true
+  // [추가] 테스트용 상품 생성 (Upsert)
+  const product = await prisma.roubizProduct.upsert({
+    where: { roubizCode: 'P_TEST_001' },
+    update: {},
+    create: {
+      roubizCode: 'P_TEST_001',
+      name: '테스트용 홍삼정',
+      standardCost: 5000
     }
   });
 
-  console.log('✅ 시드 데이터 생성 완료');
+  // 4. 테스트용 주문 생성 (중복 체크)
+  // RoubizOrderNo는 Unique하므로 이를 기준으로 존재 여부 확인
+  const existingOrder = await prisma.roubizOrder.findUnique({
+    where: { roubizOrderNo: 'R-TEST-001' }
+  });
+
+  if (!existingOrder) {
+    await prisma.clientOrder.create({
+      data: {
+        clientId: client.id, // [변경] client.id 사용
+        clientOrderNo: 'ORD-20240209-01',
+        productCode: 'P001',
+        optionName: '기본',
+        quantity: 1,
+        salesPrice: 10000,
+        orderDate: new Date(),
+        isConverted: true,
+        roubizOrders: {
+          create: {
+            roubizOrderNo: 'R-TEST-001', // ★ 이 번호로 중복 체크
+            roubizProductId: product.id,
+            quantity: 1,
+            status: 'READY' // 발주 대기 상태
+          }
+        }
+      }
+    });
+    console.log(` - Test Order 생성됨: R-TEST-001`);
+  } else {
+    console.log(` - Test Order 이미 존재함: R-TEST-001`);
+  }
+
+  console.log(`✅ 시딩 완료!`);
 }
 
 main()
