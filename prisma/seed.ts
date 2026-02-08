@@ -1,104 +1,77 @@
+// prisma/seed.ts
 import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log('🌱 시드 데이터 생성을 시작합니다...');
+  console.log('🌱 새로운 계층 구조로 시드 데이터를 생성합니다...');
 
-  // 1. 거래처 (BusinessRole)
-  const coupang = await prisma.businessRole.upsert({
-    where: { businessName: '쿠팡' },
+  // 1. 최상위 사업자 (Business)
+  const myBiz = await prisma.business.upsert({
+    where: { businessName: '(주)루비즈' },
     update: {},
     create: {
-      businessName: '쿠팡',
-      isClient: true,
-      clientGroup: 'ST',
+      businessName: '(주)루비즈',
+      ownerName: '김서늬',
     },
   });
 
-  const factoryA = await prisma.businessRole.upsert({
-    where: { businessName: '김씨공장' },
-    update: {},
-    create: {
-      businessName: '김씨공장',
-      isSupplier: true,
-    },
+  // 2. 판매처 (SalesChannel) - 엑셀 양식 포함
+  const coupang = await prisma.salesChannel.create({
+    data: {
+      businessId: myBiz.id,
+      name: '쿠팡',
+      code: 'CP01',
+      excelMapping: {
+        orderNo: '주문번호',
+        productCode: '등록상품명', // 엑셀에서 찾을 헤더명
+        optionName: '등록옵션명',
+        qty: '구매수량',
+        price: '판매가'
+      }
+    }
   });
 
-  // 2. 루비즈 상품 (RoubizProduct)
-  const singleItem = await prisma.roubizProduct.upsert({
-    where: { roubizCode: 'R-S001' },
-    update: {},
-    create: {
+  // 3. 매입처 (Supplier)
+  const factoryA = await prisma.supplier.create({
+    data: {
+      businessId: myBiz.id,
+      name: '김씨공장',
+      orderFormat: { type: 'STANDARD_PDF' }
+    }
+  });
+
+  // 4. 상품 생성
+  const singleItem = await prisma.roubizProduct.create({
+    data: {
       roubizCode: 'R-S001',
-      name: '기본 단품',
+      name: '블랙마카 단품',
       standardCost: 5000,
       isSet: false,
     },
   });
 
-  const setItem = await prisma.roubizProduct.upsert({
-    where: { roubizCode: 'R-B001' },
-    update: {},
-    create: {
-      roubizCode: 'R-B001',
-      name: '3개 묶음 세트',
-      isSet: true,
-    },
-  });
-
-  // 3. 세트 구성 (ProductBundle)
-  await prisma.productBundle.upsert({
-    where: {
-      parentProductId_childProductId: {
-        parentProductId: setItem.id,
-        childProductId: singleItem.id,
-      },
-    },
-    update: { quantity: 3 },
-    create: {
-      parentProductId: setItem.id,
-      childProductId: singleItem.id,
-      quantity: 3,
-    },
-  });
-
-  // 4. 상품 매핑 (Mapping)
-  await prisma.clientProductMapping.upsert({
-    where: {
-      clientRoleId_clientProductCode_clientOptionName: {
-        clientRoleId: coupang.id,
-        clientProductCode: 'CP-CODE-001',
-        clientOptionName: '기본',
-      },
-    },
-    update: {},
-    create: {
-      clientRoleId: coupang.id,
-      clientProductCode: 'CP-CODE-001',
+  // 5. 매핑 연결 (판매처 <-> 루비즈상품)
+  await prisma.clientProductMapping.create({
+    data: {
+      salesChannelId: coupang.id,
+      clientProductCode: 'A001',
       clientOptionName: '기본',
-      roubizProductId: setItem.id,
+      roubizProductId: singleItem.id,
     },
   });
 
-  // 5. 공급처 단가 매핑 (SupplierProduct)
-  await prisma.supplierProduct.upsert({
-    where: {
-      supplierId_roubizProductId: {
-        supplierId: factoryA.id,
-        roubizProductId: singleItem.id,
-      },
-    },
-    update: { costPrice: 4800 },
-    create: {
+  // 6. 매입처 상품 연결
+  await prisma.supplierProduct.create({
+    data: {
       supplierId: factoryA.id,
       roubizProductId: singleItem.id,
       costPrice: 4800,
-      isPrimary: true,
-    },
+      isPrimary: true
+    }
   });
 
-  console.log('✅ 시드 데이터 생성이 완료되었습니다.');
+  console.log('✅ 시드 데이터 생성 완료');
 }
 
 main()

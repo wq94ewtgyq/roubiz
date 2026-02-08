@@ -6,7 +6,7 @@ export class CreateSupplierProductDto {
   supplierName: string;      
   roubizCode: string; 
   supplierProductCode?: string;
-  supplierProductName?: string;
+  // supplierProductName?: string; // [삭제] 스키마에서 제외됨
   costPrice: number;
 }
 
@@ -22,17 +22,22 @@ export class SupplierProductService {
     });
     if (!roubizProduct) throw new NotFoundException(`상품(${dto.roubizCode}) 없음`);
 
-    // 2. 공급처 확인
-    let supplier = await prisma.businessRole.findUnique({
-      where: { businessName: dto.supplierName },
+    // 2. 공급처(Supplier) 확인
+    // [변경] BusinessRole -> Supplier
+    let supplier = await prisma.supplier.findFirst({
+      where: { name: dto.supplierName },
     });
 
+    // [변경] 공급처가 없으면 자동 생성 (기본 사업자에 연결)
     if (!supplier) {
-      supplier = await prisma.businessRole.create({
+      const defaultBiz = await prisma.business.findFirst();
+      if (!defaultBiz) throw new NotFoundException('기본 사업자 정보가 없습니다. 시드 데이터를 확인하세요.');
+
+      supplier = await prisma.supplier.create({
         data: {
-          businessName: dto.supplierName,
-          isSupplier: true,
-          clientGroup: 'DT', 
+          businessId: defaultBiz.id, // 첫 번째 사업자에 소속시킴
+          name: dto.supplierName,
+          orderFormat: { type: 'STANDARD' }, // 기본값 설정
         },
       });
     }
@@ -54,7 +59,7 @@ export class SupplierProductService {
         supplierId: supplier.id,
         roubizProductId: roubizProduct.id, 
         supplierProductCode: dto.supplierProductCode || '',
-        supplierProductName: dto.supplierProductName || roubizProduct.name,
+        // [삭제] supplierProductName 필드는 스키마에서 제거되었으므로 저장하지 않음
         costPrice: dto.costPrice,
         isPrimary: true,
       },
@@ -64,7 +69,7 @@ export class SupplierProductService {
   async findAll() {
     return await prisma.supplierProduct.findMany({
       include: { 
-        supplier: true, 
+        supplier: true, // [변경] supplier 관계 연결
         roubizProduct: true 
       },
       orderBy: { id: 'desc' },
