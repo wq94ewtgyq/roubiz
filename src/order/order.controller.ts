@@ -24,6 +24,23 @@ export class OrderController {
     return this.orderService.create(dto);
   }
 
+  // [NEW] 출고처 변경 API (PM님 요청 기능)
+  @Post('change-source')
+  @ApiOperation({ summary: '주문 출고처 변경 (발주 ↔ 창고 유연한 전환)' })
+  @ApiBody({ 
+    schema: { 
+      type: 'object', 
+      properties: { 
+        roubizOrderIds: { type: 'array', items: { type: 'number' } },
+        sourceType: { type: 'string', enum: ['SUPPLIER', 'WAREHOUSE'] },
+        warehouseId: { type: 'number', description: '창고 출고 선택 시 필수' }
+      } 
+    } 
+  })
+  changeSource(@Body() body: { roubizOrderIds: number[], sourceType: 'SUPPLIER' | 'WAREHOUSE', warehouseId?: number }) {
+    return this.orderService.changeOrderSource(body);
+  }
+
   @Post('confirm')
   @ApiOperation({ summary: '주문 확정 (임시 -> 발주대기)' })
   @ApiBody({ 
@@ -161,7 +178,7 @@ export class OrderController {
   async uploadExcel(@UploadedFile() file: Express.Multer.File) {
     const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
     
-    // [변경] SalesChannel -> Client
+    // Client 조회
     const clients = await prisma.client.findMany();
     const matchedClient = clients.find(c => originalName.includes(c.name));
 
@@ -182,7 +199,7 @@ export class OrderController {
 
     for (const row of rows) {
       const dto = new CreateOrderDto();
-      dto.channelName = matchedClient.name; // Service에서 Client 조회용으로 사용
+      dto.channelName = matchedClient.name; 
       
       dto.orderNo = row[mapping.orderNo] ? String(row[mapping.orderNo]) : `AUTO-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
       dto.productCode = row[mapping.productCode] ? String(row[mapping.productCode]) : 'UNKNOWN';
@@ -211,7 +228,6 @@ export class OrderController {
     };
   }
 
-  // [10. 통합 운송장 업로드 API]
   @Post('upload-waybill')
   @ApiOperation({ summary: '통합 운송장 업로드 (행동: 등록/수정/삭제)' })
   @ApiConsumes('multipart/form-data')
@@ -228,7 +244,6 @@ export class OrderController {
     return this.orderService.uploadWaybill(file.buffer);
   }
 
-  // [11. Client용 운송장 회신 (엑셀 다운로드)]
   @Post('download-waybill')
   @ApiOperation({ summary: 'Client 회신용 운송장 엑셀 다운로드' })
   @ApiBody({ 

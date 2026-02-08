@@ -19,12 +19,12 @@ model Business {
   bizNumber    String?  
   ownerName    String?  
   
-  clients      Client[]    // [변경] SalesChannel -> Client
+  clients      Client[]    // SalesChannel -> Client
   suppliers    Supplier[]
   warehouses   Warehouse[]
 }
 
-// [변경] SalesChannel -> Client (판매처/고객사)
+// Client (판매처/고객사)
 model Client {
   id            Int      @id @default(autoincrement())
   businessId    Int
@@ -64,6 +64,10 @@ model Warehouse {
   outputFormat Json?    // 송장 양식 설정
 
   stocks       WarehouseStock[]
+  
+  // [NEW] 매핑 및 주문 연결 (역방향 관계)
+  targetedMappings ClientProductMapping[] 
+  assignedOrders   RoubizOrder[]
 }
 
 // ======================================================
@@ -105,13 +109,20 @@ model ProductBundle {
 
 model ClientProductMapping {
   id                Int           @id @default(autoincrement())
-  clientId          Int           // [변경] salesChannelId -> clientId
+  clientId          Int           // clientId
   client            Client        @relation(fields: [clientId], references: [id])
   
   clientProductCode String        
   clientOptionName  String        
+  
   roubizProductId   Int
   roubizProduct     RoubizProduct @relation(fields: [roubizProductId], references: [id])
+
+  // [NEW] ★ 지정 출고처 (파생상품 개념 구현)
+  // NULL: 본사 위탁 발주 (Supplier) - 기본값
+  // 값 있음: 해당 창고 재고 우선 사용 (Warehouse)
+  targetWarehouseId Int?          
+  targetWarehouse   Warehouse?    @relation(fields: [targetWarehouseId], references: [id])
   
   @@unique([clientId, clientProductCode, clientOptionName], name: "client_product_option")
 }
@@ -136,7 +147,7 @@ model SupplierProduct {
 
 model ClientOrder {
   id             Int          @id @default(autoincrement())
-  clientId       Int          // [변경] salesChannelId -> clientId
+  clientId       Int          // clientId
   client         Client       @relation(fields: [clientId], references: [id])
   
   clientOrderNo  String   
@@ -160,6 +171,14 @@ model RoubizOrder {
   quantity        Int           
   status          String        @default("PENDING") // PENDING, READY, ORDERED, HOLD, SCHEDULED, SHIPPING
   
+  // [NEW] ★ 이 주문 건은 어디서 처리할 것인가? (유연한 변경 가능)
+  // 'SUPPLIER' (발주) / 'WAREHOUSE' (창고재고)
+  sourceType      String        @default("SUPPLIER") 
+
+  // [NEW] 창고 출고일 경우, 어느 창고인가?
+  warehouseId     Int?          
+  warehouse       Warehouse?    @relation(fields: [warehouseId], references: [id])
+
   // [발주 관제 필드]
   targetOrderDate DateTime?     @default(now())     
   holdReason      String?       

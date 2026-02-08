@@ -4,8 +4,6 @@ import { CreateSupplierOrderDto } from './dto/create-supplier-order.dto';
 import { PrismaClient, RoubizOrder, SupplierOrder } from '@prisma/client';
 import { ExcelService } from '../common/excel.service'; 
 
-// ⚠️ 주의: 여기에 'import { OrderService } ...' 가 있으면 절대 안 됩니다! (삭제됨)
-
 const prisma = new PrismaClient();
 
 @Injectable()
@@ -52,6 +50,10 @@ export class OrderService {
       const dateStr = new Date().toISOString().slice(2, 10).replace(/-/g, '');
       const randomStr = Math.random().toString(36).substring(2, 7).toUpperCase();
       
+      // [NEW] 매핑 정보에 따라 출고처 자동 설정
+      const sourceType = mapping.targetWarehouseId ? 'WAREHOUSE' : 'SUPPLIER';
+      const warehouseId = mapping.targetWarehouseId || null;
+
       roubizOrder = await prisma.roubizOrder.create({
         data: {
           clientOrderId: clientOrder.id,
@@ -59,7 +61,11 @@ export class OrderService {
           roubizProductId: mapping.roubizProductId,
           quantity: dto.quantity,
           status: 'PENDING',
-          targetOrderDate: new Date() 
+          targetOrderDate: new Date(),
+          
+          // [NEW] DB에 저장
+          sourceType: sourceType,
+          warehouseId: warehouseId
         }
       });
 
@@ -74,6 +80,28 @@ export class OrderService {
       status: mapping ? 'SUCCESS' : 'WARNING',
       matchResult: mapping ? `✅ 인식상품: ${mapping.roubizProduct.name}` : '⚠️ 매핑 정보 없음',
       roubizOrderNo: roubizOrder?.roubizOrderNo || null
+    };
+  }
+
+  // [NEW] 1.5. 주문 출고처 변경 (유연한 처리)
+  async changeOrderSource(dto: { roubizOrderIds: number[], sourceType: 'SUPPLIER' | 'WAREHOUSE', warehouseId?: number }) {
+    if (dto.sourceType === 'WAREHOUSE' && !dto.warehouseId) {
+      throw new BadRequestException('창고 출고로 변경 시, 창고 ID(warehouseId)는 필수입니다.');
+    }
+
+    const result = await prisma.roubizOrder.updateMany({
+      where: { 
+        id: { in: dto.roubizOrderIds },
+        status: { in: ['PENDING', 'READY'] } // 아직 배송 안 나간 것만 변경 가능
+      },
+      data: {
+        sourceType: dto.sourceType,
+        warehouseId: dto.sourceType === 'SUPPLIER' ? null : dto.warehouseId
+      }
+    });
+
+    return { 
+      message: `${result.count}건의 주문 출고처가 '${dto.sourceType}'로 변경되었습니다.` 
     };
   }
 
@@ -176,8 +204,13 @@ export class OrderService {
 
   // [6. 발주 생성]
   async createSupplierOrders(dto: CreateSupplierOrderDto) {
+    // [중요] 'SUPPLIER' 타입인 주문만 발주 생성 (창고 출고 건 제외)
     const orders = await prisma.roubizOrder.findMany({
-      where: { id: { in: dto.roubizOrderIds }, status: 'READY' },
+      where: { 
+        id: { in: dto.roubizOrderIds }, 
+        status: 'READY',
+        sourceType: 'SUPPLIER' // ★ 발주 건만 필터링
+      },
       include: {
         roubizProduct: {
           include: {
@@ -188,7 +221,7 @@ export class OrderService {
       }
     });
 
-    if (orders.length === 0) throw new NotFoundException('발주 가능한 주문이 없습니다.');
+    if (orders.length === 0) throw new NotFoundException('발주 가능한 주문(본사발주 건)이 없습니다.');
 
     const supplierBatches = new Map<number, any[]>();
 
@@ -255,11 +288,13 @@ export class OrderService {
       createdOrders.push(newSupplierOrder);
     }
 
+    // 발주된 주문 상태 변경
     await prisma.roubizOrder.updateMany({
-      where: { id: { in: dto.roubizOrderIds }, status: 'READY' },
+      where: { id: { in: orders.map(o => o.id) } }, // 필터링된 ID만 사용
       data: { status: 'ORDERED' }
     });
 
+    // 다음차수 보류 해제 로직은 유지
     await prisma.roubizOrder.updateMany({
       where: {
         status: 'HOLD',
