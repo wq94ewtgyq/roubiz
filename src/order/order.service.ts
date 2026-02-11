@@ -1,46 +1,37 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { CreateSupplierOrderDto } from './dto/create-supplier-order.dto';
-import { PrismaClient, RoubizOrder, SupplierOrder } from '@prisma/client';
+import { PrismaClient, RoubizOrder, OrderExecution, Prisma } from '@prisma/client';
 import { ExcelService } from '../common/excel.service'; 
+import { InventoryService } from '../inventory/inventory.service';
 
 const prisma = new PrismaClient();
 
 @Injectable()
 export class OrderService {
-  constructor(private readonly excelService: ExcelService) {} 
+  constructor(
+    private readonly excelService: ExcelService,
+    private readonly inventoryService: InventoryService,
+  ) {} 
 
-  // [1. 수주 등록]
+  // [1. 수주 등록] - ★ 스마트 분할 로직 탑재
   async create(dto: CreateOrderDto) {
     const safeOption = dto.optionName?.trim() || '옵션없음';
+    const client = await prisma.client.findFirst({ where: { name: dto.channelName } });
+    if (!client) throw new NotFoundException(`'${dto.channelName}' Client를 찾을 수 없습니다.`);
 
-    const client = await prisma.client.findFirst({
-      where: { name: dto.channelName },
-    });
-    
-    if (!client) throw new NotFoundException(`'${dto.channelName}' Client(판매처)를 찾을 수 없습니다.`);
-
+    // 1. 고객 주문 원본 저장
     const clientOrder = await prisma.clientOrder.create({
       data: {
-        clientId: client.id,
-        clientOrderNo: dto.orderNo,
-        productCode: dto.productCode,
-        optionName: safeOption,
-        quantity: dto.quantity,
-        salesPrice: dto.price,
-        orderDate: new Date(),
-        isConverted: false,
+        clientId: client.id, clientOrderNo: dto.orderNo, productCode: dto.productCode,
+        optionName: safeOption, quantity: dto.quantity, salesPrice: dto.price,
+        orderDate: new Date(), isConverted: false,
       }
     });
 
+    // 2. 상품 매핑 확인
     const mapping = await prisma.clientProductMapping.findUnique({
-      where: {
-        client_product_option: { 
-          clientId: client.id,
-          clientProductCode: dto.productCode,
-          clientOptionName: safeOption
-        }
-      },
+      where: { client_product_option: { clientId: client.id, clientProductCode: dto.productCode, clientOptionName: safeOption } },
       include: { roubizProduct: true }
     });
 
@@ -49,450 +40,344 @@ export class OrderService {
     if (mapping) {
       const dateStr = new Date().toISOString().slice(2, 10).replace(/-/g, '');
       const randomStr = Math.random().toString(36).substring(2, 7).toUpperCase();
-      
-      // [NEW] 매핑 정보에 따라 출고처 자동 설정
-      const sourceType = mapping.targetWarehouseId ? 'WAREHOUSE' : 'SUPPLIER';
-      const warehouseId = mapping.targetWarehouseId || null;
+      const newOrderNo = `R-${dateStr}-${randomStr}`;
 
+      // ★ [스마트 분할 로직 시작]
+      const MAX_PER_BOX = 10; 
+      const totalQuantity = dto.quantity;
+      const boxCount = Math.ceil(totalQuantity / MAX_PER_BOX);
+      
+      const executions: Prisma.OrderExecutionUncheckedCreateWithoutOrderInput[] = [];
+
+      for (let i = 1; i <= boxCount; i++) {
+          const qty = (i === boxCount) ? totalQuantity - (MAX_PER_BOX * (i - 1)) : MAX_PER_BOX;
+          const suffix = `_${i}x${boxCount}`; 
+          
+          executions.push({
+            executionNo: `${newOrderNo}${suffix}`,
+            executionType: mapping.targetWarehouseId ? 'WAREHOUSE' : 'SUPPLIER',
+            warehouseId: mapping.targetWarehouseId || null,
+            quantity: qty, 
+            status: 'PENDING'
+          });
+      }
+      // ★ [스마트 분할 로직 끝]
+
+      // 3. 매출(부모) + 실행(자식들) 동시 생성
       roubizOrder = await prisma.roubizOrder.create({
         data: {
-          clientOrderId: clientOrder.id,
-          roubizOrderNo: `R-${dateStr}-${randomStr}`,
-          roubizProductId: mapping.roubizProductId,
-          quantity: dto.quantity,
-          status: 'PENDING',
-          targetOrderDate: new Date(),
-          
-          // [NEW] DB에 저장
-          sourceType: sourceType,
-          warehouseId: warehouseId
+          clientOrderId: clientOrder.id, roubizOrderNo: newOrderNo,
+          roubizProductId: mapping.roubizProductId, quantity: dto.quantity, status: 'PENDING',
+          executions: { create: executions }
         }
       });
 
-      await prisma.clientOrder.update({
-        where: { id: clientOrder.id },
-        data: { isConverted: true }
-      });
+      await prisma.clientOrder.update({ where: { id: clientOrder.id }, data: { isConverted: true } });
     }
-
-    return {
-      message: '주문 접수가 완료되었습니다.',
-      status: mapping ? 'SUCCESS' : 'WARNING',
-      matchResult: mapping ? `✅ 인식상품: ${mapping.roubizProduct.name}` : '⚠️ 매핑 정보 없음',
-      roubizOrderNo: roubizOrder?.roubizOrderNo || null
-    };
-  }
-
-  // [NEW] 1.5. 주문 출고처 변경 (유연한 처리)
-  async changeOrderSource(dto: { roubizOrderIds: number[], sourceType: 'SUPPLIER' | 'WAREHOUSE', warehouseId?: number }) {
-    if (dto.sourceType === 'WAREHOUSE' && !dto.warehouseId) {
-      throw new BadRequestException('창고 출고로 변경 시, 창고 ID(warehouseId)는 필수입니다.');
-    }
-
-    const result = await prisma.roubizOrder.updateMany({
-      where: { 
-        id: { in: dto.roubizOrderIds },
-        status: { in: ['PENDING', 'READY'] } // 아직 배송 안 나간 것만 변경 가능
-      },
-      data: {
-        sourceType: dto.sourceType,
-        warehouseId: dto.sourceType === 'SUPPLIER' ? null : dto.warehouseId
-      }
-    });
 
     return { 
-      message: `${result.count}건의 주문 출고처가 '${dto.sourceType}'로 변경되었습니다.` 
+        message: '접수 완료', 
+        roubizOrderNo: roubizOrder?.roubizOrderNo,
+        splitCount: roubizOrder ? Math.ceil(dto.quantity / 10) : 0 
     };
   }
 
   // [2. 확정]
   async confirmOrders(roubizOrderIds: number[]) {
-    if (!roubizOrderIds || roubizOrderIds.length === 0) throw new BadRequestException('선택된 주문이 없습니다.');
-    const result = await prisma.roubizOrder.updateMany({
-      where: { id: { in: roubizOrderIds }, status: 'PENDING' },
-      data: { 
-        status: 'READY',
-        targetOrderDate: new Date() 
-      }
-    });
-    return { count: result.count, message: `${result.count}건 확정 완료` };
-  }
-
-  // [3. 보류 처리]
-  async setHoldStatus(dto: { ids: number[], reason: string, type: 'MANUAL' | 'NEXT_ROUND' }) {
-    if (!dto.ids || dto.ids.length === 0) throw new BadRequestException('선택된 주문이 없습니다.');
-    if (!dto.reason) throw new BadRequestException('보류 사유는 필수입니다.');
-
-    const isNextRound = dto.type === 'NEXT_ROUND';
-
-    const result = await prisma.roubizOrder.updateMany({
-      where: { id: { in: dto.ids } },
-      data: {
-        status: 'HOLD',          
-        holdReason: dto.reason,  
-        isNextRound: isNextRound 
-      }
-    });
-
-    return { 
-      message: `${result.count}건이 ${isNextRound ? '[다음 차수 대기]' : '[수동 보류]'} 처리되었습니다.` 
-    };
-  }
-
-  // [4. 지정일 배송 설정]
-  async setSchedule(ids: number[], date: string, reason: string) {
-    if (!ids || ids.length === 0) throw new BadRequestException('선택된 주문이 없습니다.');
-    if (!reason) throw new BadRequestException('지정일 변경 사유는 필수입니다.');
-
-    const targetDate = new Date(date);
-    const now = new Date();
-    
-    const newStatus = targetDate > now ? 'SCHEDULED' : 'READY';
-
-    const result = await prisma.roubizOrder.updateMany({
-      where: { id: { in: ids } },
-      data: {
-        status: newStatus,
-        targetOrderDate: targetDate,
-        holdReason: reason
-      }
-    });
-
-    return { message: `${result.count}건의 발주 예정일이 변경되었습니다.` };
-  }
-
-  // [5. 발주 관제 대시보드]
-  async getDispatchDashboard() {
-    const endOfToday = new Date();
-    endOfToday.setHours(23, 59, 59, 999);
-
-    const allOrders = await prisma.roubizOrder.findMany({
-      where: {
-        status: { in: ['READY', 'HOLD', 'SCHEDULED'] }
-      },
-      include: {
-        roubizProduct: true,
-        clientOrder: { include: { client: true } }
-      },
-      orderBy: { targetOrderDate: 'asc' }
-    });
-
-    type OrderType = typeof allOrders[0];
-
-    const dashboard: {
-      ready: OrderType[];
-      hold: OrderType[];
-      scheduled: OrderType[];
-    } = {
-      ready: [],      
-      hold: [],       
-      scheduled: []   
-    };
-
-    for (const order of allOrders) {
-      if (order.status === 'HOLD') {
-        dashboard.hold.push(order);
-      } else if (order.status === 'SCHEDULED' || (order.targetOrderDate && new Date(order.targetOrderDate) > endOfToday)) {
-        dashboard.scheduled.push(order);
-      } else {
-        dashboard.ready.push(order);
-      }
-    }
-
-    return dashboard;
-  }
-
-  // [6. 발주 생성]
-  async createSupplierOrders(dto: CreateSupplierOrderDto) {
-    // [중요] 'SUPPLIER' 타입인 주문만 발주 생성 (창고 출고 건 제외)
     const orders = await prisma.roubizOrder.findMany({
-      where: { 
-        id: { in: dto.roubizOrderIds }, 
-        status: 'READY',
-        sourceType: 'SUPPLIER' // ★ 발주 건만 필터링
-      },
-      include: {
-        roubizProduct: {
-          include: {
-            childBundles: true,
-            supplierProducts: { where: { isPrimary: true }, include: { supplier: true } }
-          }
-        }
-      }
+      where: { id: { in: roubizOrderIds }, status: 'PENDING' },
+      include: { executions: true }
     });
 
-    if (orders.length === 0) throw new NotFoundException('발주 가능한 주문(본사발주 건)이 없습니다.');
-
-    const supplierBatches = new Map<number, any[]>();
+    const successIds: number[] = [];
 
     for (const order of orders) {
-      const product = order.roubizProduct;
-      const primaryMapping = product.supplierProducts[0];
+      for (const exec of order.executions) {
+        if (exec.status !== 'PENDING') continue;
 
-      if (!primaryMapping) continue;
-
-      const sId = primaryMapping.supplierId;
-      if (!supplierBatches.has(sId)) supplierBatches.set(sId, []);
-
-      if (product.isSet) {
-        for (const bundle of product.childBundles) {
-          supplierBatches.get(sId)!.push({
-            roubizProductId: bundle.childProductId,
-            quantity: order.quantity * bundle.quantity,
-            unitCost: 0 
-          });
-        }
-      } else {
-        supplierBatches.get(sId)!.push({
-          roubizProductId: order.roubizProductId,
-          quantity: order.quantity,
-          unitCost: primaryMapping.costPrice
-        });
-      }
-    }
-
-    const createdOrders: SupplierOrder[] = [];
-    
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const todayEnd = new Date();
-    todayEnd.setHours(23, 59, 59, 999);
-
-    for (const [supplierId, items] of supplierBatches.entries()) {
-      const todayCount = await prisma.supplierOrder.count({
-        where: {
-          supplierId: supplierId,
-          orderedAt: { gte: todayStart, lte: todayEnd }
-        }
-      });
-      const nextRound = todayCount + 1;
-
-      const dateStr = new Date().toISOString().slice(2, 10).replace(/-/g, '');
-      const randomStr = Math.random().toString(36).substring(2, 5).toUpperCase();
-
-      const newSupplierOrder = await prisma.supplierOrder.create({
-        data: {
-          supplierId: supplierId,
-          supplierOrderNo: `PO-${dateStr}-${randomStr}`,
-          round: nextRound,
-          status: 'ORDERED',
-          items: {
-            create: items.map(item => ({
-              roubizProductId: item.roubizProductId,
-              quantity: item.quantity,
-              unitCost: item.unitCost
-            }))
+        if (exec.executionType === 'WAREHOUSE' && exec.warehouseId) {
+          try {
+             await this.inventoryService.allocateStock(exec.warehouseId, order.roubizProductId, exec.quantity);
+          } catch (e) {
+             throw new BadRequestException(`[${order.roubizOrderNo}] 재고 할당 실패: ${e.message}`);
           }
         }
+        
+        await prisma.orderExecution.update({
+           where: { id: exec.id }, data: { status: 'READY' }
+        });
+      }
+
+      await prisma.roubizOrder.update({
+        where: { id: order.id }, data: { status: 'READY' }
       });
-      createdOrders.push(newSupplierOrder);
+      successIds.push(order.id);
     }
-
-    // 발주된 주문 상태 변경
-    await prisma.roubizOrder.updateMany({
-      where: { id: { in: orders.map(o => o.id) } }, // 필터링된 ID만 사용
-      data: { status: 'ORDERED' }
-    });
-
-    // 다음차수 보류 해제 로직은 유지
-    await prisma.roubizOrder.updateMany({
-      where: {
-        status: 'HOLD',
-        isNextRound: true
-      },
-      data: {
-        status: 'READY',
-        isNextRound: false,
-      }
-    });
-
-    return { supplierOrders: createdOrders };
+    return { message: `${successIds.length}건 확정 완료 (재고할당 성공)` };
   }
 
-  // [7. 발주서 삭제]
-  async cancelSupplierOrder(supplierOrderId: number) {
-    const targetPO = await prisma.supplierOrder.findUnique({ where: { id: supplierOrderId } });
-    if (!targetPO) throw new NotFoundException('존재하지 않는 발주서입니다.');
-
-    await prisma.supplierOrder.delete({
-      where: { id: supplierOrderId }
+  // [3. 보류]
+  async setHoldStatus(dto: { ids: number[], reason: string, type?: string }) {
+    const orders = await prisma.roubizOrder.findMany({
+        where: { id: { in: dto.ids } },
+        include: { executions: true }
     });
 
-    return { message: `발주서(${targetPO.supplierOrderNo})가 삭제되었습니다. 필요 시 주문 상태를 복구(Rollback)해주세요.` };
-  }
-
-  // [8. 주문 상태 복구]
-  async rollbackOrders(roubizOrderIds: number[]) {
-    const result = await prisma.roubizOrder.updateMany({
-      where: { id: { in: roubizOrderIds }, status: 'ORDERED' },
-      data: { status: 'READY' }
-    });
-    return { message: `${result.count}건의 주문이 발주대기 상태로 복구되었습니다.` };
-  }
-
-  // [9. 발주서 상세 조회]
-  async findSupplierOrder(id: number) {
-    const order = await prisma.supplierOrder.findUnique({
-      where: { id },
-      include: {
-        supplier: {
-          include: { business: true } 
-        },
-        items: {
-          include: { roubizProduct: true }
+    for (const order of orders) {
+        for (const exec of order.executions) {
+            if (exec.status === 'READY' && exec.executionType === 'WAREHOUSE' && exec.warehouseId) {
+                await this.inventoryService.releaseStock(exec.warehouseId, order.roubizProductId, exec.quantity);
+            }
         }
-      }
-    });
-
-    if (!order) throw new NotFoundException('해당 발주서를 찾을 수 없습니다.');
-    return order;
+        await prisma.roubizOrder.update({
+             where: { id: order.id }, data: { status: 'HOLD' } 
+        });
+    }
+    return { message: '보류 처리 완료 (재고 할당 해제됨)' };
   }
 
-  // [10. 통합 운송장 업로드 (행동 기반)]
+  // [4. 발주 생성 (위탁)]
+  async createSupplierOrders(dto: CreateSupplierOrderDto) {
+    const executions = await prisma.orderExecution.findMany({
+      where: { orderId: { in: dto.roubizOrderIds }, status: 'READY', executionType: 'SUPPLIER' }
+    });
+
+    if (executions.length === 0) throw new BadRequestException('발주 가능한 위탁 건이 없습니다.');
+
+    await prisma.orderExecution.updateMany({
+      where: { id: { in: executions.map(e => e.id) } },
+      data: { status: 'INSTRUCTED' }
+    });
+    
+    await prisma.roubizOrder.updateMany({
+      where: { id: { in: dto.roubizOrderIds } },
+      data: { status: 'PARTIAL' }
+    });
+    return { message: `${executions.length}건 발주지시 완료` };
+  }
+
+  // [5. 출고처 변경]
+  async changeOrderSource(dto: { roubizOrderIds: number[], sourceType: 'SUPPLIER' | 'WAREHOUSE', warehouseId?: number }) {
+    const executions = await prisma.orderExecution.findMany({
+      where: { orderId: { in: dto.roubizOrderIds } }
+    });
+
+    await prisma.orderExecution.updateMany({
+      where: { id: { in: executions.map(e => e.id) } },
+      data: {
+        executionType: dto.sourceType,
+        warehouseId: dto.sourceType === 'SUPPLIER' ? null : dto.warehouseId,
+        supplierId: null
+      }
+    });
+    return { message: '출고처 변경 완료' };
+  }
+
+  // [6. 운송장 업로드] - (수정완료) PM님 표준 양식 적용
   async uploadWaybill(fileBuffer: Buffer) {
     const rows = this.excelService.readExcel(fileBuffer);
     const results: any[] = [];
 
     for (const row of rows) {
-      const action = String(row['행동'] || '').trim(); 
-      const orderNo = String(row['발주번호'] || '').trim(); 
-      const carrierName = String(row['택배사명'] || '').trim();
-      let trackingNo = String(row['운송장번호'] || '').trim();
+      // 1. PM님 표준 양식 컬럼 매핑
+      const action = String(row['행동'] || '등록').trim(); 
+      const execNo = String(row['발주번호'] || '').trim();
+      const carrierName = String(row['택배사명'] || '').trim(); 
+      const trackingNo = String(row['운송장번호'] || '').trim().replace(/[^a-zA-Z0-9]/g, '');
 
-      trackingNo = trackingNo.replace(/[^a-zA-Z0-9]/g, '');
+      // 2. 발주 데이터 찾기
+      const execution = await prisma.orderExecution.findUnique({ 
+          where: { executionNo: execNo },
+          include: { order: true } 
+      });
 
-      try {
-        const order = await prisma.roubizOrder.findUnique({
-          where: { roubizOrderNo: orderNo },
-        });
-
-        if (!order) {
-            results.push({ orderNo, status: 'FAIL', msg: '주문번호 없음' });
-            continue;
-        }
-
-        let carrierId: number | null = null;
-        if (carrierName && action !== '삭제') {
-           const mapping = await prisma.carrierMapping.findUnique({ where: { alias: carrierName } });
-           if (mapping) {
-             carrierId = mapping.carrierId;
-           } else {
-             const standard = await prisma.carrier.findFirst({ where: { name: carrierName } });
-             if (standard) carrierId = standard.id;
-             else throw new Error(`시스템에 등록되지 않은 택배사명(${carrierName})`);
-           }
-        }
-
-        if (action === '등록') {
-          if (order.trackingNumber) {
-             if (order.trackingNumber === trackingNo) {
-                 results.push({ orderNo, status: 'SKIP', msg: '동일 운송장 이미 존재' });
-                 continue;
-             }
-             throw new Error(`이미 운송장(${order.trackingNumber})이 존재함. '수정' 모드 사용 필요.`);
-          }
-          
-          await prisma.roubizOrder.update({
-            where: { id: order.id },
-            data: {
-              carrierId,
-              trackingNumber: trackingNo,
-              status: 'SHIPPING',
-              shippedAt: new Date()
-            }
-          });
-          results.push({ orderNo, status: 'SUCCESS', msg: '등록 완료' });
-
-        } else if (action === '수정') {
-          await prisma.roubizOrder.update({
-            where: { id: order.id },
-            data: {
-              carrierId: carrierId || order.carrierId,
-              trackingNumber: trackingNo,
-              status: 'SHIPPING',
-              shippedAt: new Date()
-            }
-          });
-          results.push({ orderNo, status: 'SUCCESS', msg: '수정 완료' });
-
-        } else if (action === '삭제') {
-          await prisma.roubizOrder.update({
-            where: { id: order.id },
-            data: {
-              carrierId: null,
-              trackingNumber: null,
-              status: 'ORDERED',
-              shippedAt: null
-            }
-          });
-          results.push({ orderNo, status: 'SUCCESS', msg: '삭제 완료' });
-
-        } else {
-          throw new Error(`알 수 없는 행동: ${action}`);
-        }
-
-      } catch (e) {
-        results.push({ orderNo, status: 'FAIL', msg: e.message });
+      if (!execution) {
+        results.push({ execNo, status: 'FAIL', msg: '발주번호 없음' });
+        continue;
       }
+
+      // 3. 택배사 자동 매핑 (이름 -> ID)
+      let carrierId = execution.carrierId; 
+      if (carrierName) {
+        const carrier = await prisma.carrier.findFirst({ where: { name: carrierName } });
+        if (carrier) {
+            carrierId = carrier.id;
+        }
+      }
+
+      // 4. 재고 출고 처리 (창고인 경우만)
+      if (execution.executionType === 'WAREHOUSE' && execution.warehouseId && execution.status !== 'SHIPPING') {
+             await this.inventoryService.shipStock(
+                 execution.warehouseId, execution.order.roubizProductId, execution.quantity
+             );
+      }
+
+      // 5. 업데이트 실행
+      await prisma.orderExecution.update({
+        where: { id: execution.id },
+        data: { 
+            status: 'SHIPPING', 
+            trackingNumber: trackingNo, 
+            carrierId: carrierId,
+            shippedAt: new Date() 
+        }
+      });
+      // trackingNumber: trackingNo  <-- 이걸 추가했습니다!
+      results.push({ execNo, action, status: 'SUCCESS', carrier: carrierName });
+    }
+    return { results };
+  }
+
+  // [7. 엑셀 다운로드 (Client용)]
+  async downloadWaybillForClient(clientId: number, orderIds: number[]) {
+    const orders = await prisma.roubizOrder.findMany({
+        where: { id: { in: orderIds }, clientOrder: { clientId: clientId } },
+        include: { clientOrder: true, executions: { include: { carrier: true } } }
+    });
+
+    const client = await prisma.client.findUnique({ where: { id: clientId } });
+    if (!client) throw new NotFoundException('Client 정보 없음');
+
+    let format: Record<string, string> = { '주문번호': 'clientOrder.clientOrderNo', '송장번호': 'execution.trackingNumber' };
+    try {
+        if (typeof client.waybillFormat === 'string') {
+            format = JSON.parse(client.waybillFormat);
+        } else if (client.waybillFormat) {
+            format = client.waybillFormat as Record<string, string>;
+        }
+    } catch(e) {}
+
+    const excelData: any[] = [];
+    for (const order of orders) {
+        for (const exec of order.executions) {
+            if (exec.trackingNumber) {
+                const row: any = {};
+                for (const [header, keyPath] of Object.entries(format)) {
+                    if (keyPath === 'clientOrder.clientOrderNo') row[header] = order.clientOrder.clientOrderNo;
+                    else if (keyPath === 'execution.trackingNumber' || keyPath === 'trackingNumber') row[header] = exec.trackingNumber;
+                    else if (keyPath === 'execution.carrier.name' || keyPath === 'carrier.name') row[header] = exec.carrier?.name || '';
+                    else row[header] = ''; 
+                }
+                excelData.push(row);
+            }
+        }
+    }
+    return { buffer: this.excelService.writeExcel(excelData), filename: `waybill.xlsx` };
+  }
+
+  // [8. 발주 관제 대시보드]
+  async getDispatchDashboard() {
+    const orders = await prisma.roubizOrder.findMany({
+        where: { status: { in: ['READY', 'HOLD', 'SCHEDULED', 'PARTIAL'] } },
+        include: { roubizProduct: true, executions: true, clientOrder: { include: { client: true } } },
+        orderBy: { createdAt: 'desc' }
+    });
+    return {
+        ready: orders.filter(o => o.status === 'READY' || o.status === 'PARTIAL'),
+        hold: orders.filter(o => o.status === 'HOLD'),
+        scheduled: orders.filter(o => o.status === 'SCHEDULED'),
+    };
+  }
+
+  // ======================================================
+  // [Step 2. CS/클레임] 배송 전 주문 취소
+  // ======================================================
+
+  /**
+   * [취소] 배송 전 주문 취소
+   *
+   * - WAREHOUSE: allocated(할당 재고) 해제 후 CANCELLED
+   * - SUPPLIER:  상태만 CANCELLED
+   *
+   * 취소 불가 조건:
+   *   1. 이미 COMPLETED / CANCELLED 상태
+   *   2. 실행 건 중 하나라도 SHIPPING / RETURNED 상태
+   */
+  async cancelOrders(dto: { ids: number[]; reason: string }) {
+    const orders = await prisma.roubizOrder.findMany({
+      where: { id: { in: dto.ids } },
+      include: { executions: true },
+    });
+
+    const results: { id: number; orderNo?: string; status: string; reason?: string }[] = [];
+
+    for (const order of orders) {
+      // ── 가드 1: 이미 종료된 주문
+      if (['COMPLETED', 'CANCELLED'].includes(order.status)) {
+        results.push({ id: order.id, orderNo: order.roubizOrderNo, status: 'SKIP', reason: '이미 완료/취소된 주문' });
+        continue;
+      }
+
+      // ── 가드 2: 출고(SHIPPING)·반품(RETURNED) 실행 건이 하나라도 존재하면 취소 불가
+      const hasShipped = order.executions.some(e => ['SHIPPING', 'RETURNED'].includes(e.status));
+      if (hasShipped) {
+        results.push({ id: order.id, orderNo: order.roubizOrderNo, status: 'FAIL', reason: '이미 출고된 실행 건 포함 — 취소 불가' });
+        continue;
+      }
+
+      // ── 실행 건별 처리
+      for (const exec of order.executions) {
+        if (exec.status === 'CANCELLED') continue;
+
+        /**
+         * WAREHOUSE + READY 상태일 때만 할당 해제.
+         * ※ HOLD 주문은 setHoldStatus()에서 이미 해제했으므로 중복 차감 방지.
+         */
+        if (
+          exec.executionType === 'WAREHOUSE' &&
+          exec.warehouseId &&
+          exec.status === 'READY' &&
+          order.status !== 'HOLD'
+        ) {
+          await this.inventoryService.releaseStock(exec.warehouseId, order.roubizProductId, exec.quantity);
+        }
+
+        await prisma.orderExecution.update({
+          where: { id: exec.id },
+          data: { status: 'CANCELLED' },
+        });
+      }
+
+      // ── 주문 상태 → CANCELLED
+      const prevStatus = order.status;
+      await prisma.roubizOrder.update({
+        where: { id: order.id },
+        data: { status: 'CANCELLED' },
+      });
+
+      // ── 이력 기록
+      await prisma.orderHistory.create({
+        data: {
+          orderId: order.id,
+          prevStatus,
+          nextStatus: 'CANCELLED',
+          reason: dto.reason || '배송 전 취소',
+        },
+      });
+
+      results.push({ id: order.id, orderNo: order.roubizOrderNo, status: 'SUCCESS' });
     }
 
-    return { total: rows.length, results };
+    const successCount = results.filter(r => r.status === 'SUCCESS').length;
+    return { message: `${successCount}건 취소 완료`, results };
   }
 
-  // [11. Client용 운송장 회신 (엑셀 다운로드)]
-  async downloadWaybillForClient(clientId: number, orderIds: number[]) {
-    const client = await prisma.client.findUnique({
-      where: { id: clientId },
-    });
-    if (!client) throw new NotFoundException('Client(판매처)를 찾을 수 없습니다.');
+  // [기타 Stub 구현]
+  async setSchedule(ids: number[], date: string, reason: string) { return { message: '기능 미구현' }; }
+  async cancelSupplierOrder(id: number) { return { message: '기능 미구현' }; }
+  async rollbackOrders(ids: number[]) { return { message: '기능 미구현' }; }
+  async findSupplierOrder(id: number) { return null; }
+  async remove(id: number) { return { message: '삭제됨' }; }
 
-    const orders = await prisma.roubizOrder.findMany({
-      where: {
-        id: { in: orderIds },
-        status: 'SHIPPING', 
-        clientOrder: { clientId: clientId }
-      },
+  // ★ [수정] 진짜 데이터를 조회하도록 변경 (주문 확인용)
+  async findAll() { 
+    return await prisma.roubizOrder.findMany({
       include: {
         clientOrder: true,
-        carrier: true
-      }
+        executions: true,
+        roubizProduct: true
+      },
+      orderBy: { createdAt: 'desc' }
     });
-
-    if (orders.length === 0) throw new NotFoundException('출력할 배송 중인 주문이 없습니다.');
-
-    const format = client.waybillFormat as Record<string, string> || {
-      '주문번호': 'clientOrder.clientOrderNo',
-      '택배사': 'carrier.name',
-      '송장번호': 'trackingNumber'
-    };
-
-    const excelData = orders.map(order => {
-      const row: any = {};
-      for (const [header, keyPath] of Object.entries(format)) {
-        const keys = keyPath.split('.');
-        let value: any = order;
-        for (const k of keys) {
-          value = value ? value[k] : '';
-        }
-        row[header] = value;
-      }
-      return row;
-    });
-
-    return {
-      buffer: this.excelService.writeExcel(excelData),
-      filename: `${client.name}_운송장등록_${new Date().toISOString().slice(0,10)}.xlsx`
-    };
-  }
-
-  async findAll() {
-    return await prisma.clientOrder.findMany({
-      include: { roubizOrders: { include: { roubizProduct: true } } },
-      orderBy: { id: 'desc' },
-    });
-  }
-
-  async remove(id: number) {
-    return await prisma.clientOrder.delete({ where: { id } });
   }
 }

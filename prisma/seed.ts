@@ -1,130 +1,110 @@
 // prisma/seed.ts
+
 import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log('🌱 초기 데이터 시딩 시작...');
+  console.log('🌱 [ERP 초기 데이터] 시딩 시작...');
 
-  // 1. Business(본사) 생성 (Upsert: 있으면 유지, 없으면 생성)
+  // -------------------------------------------------------
+  // [0] 초기화 (기존 데이터 삭제 - 순서 중요: 자식 -> 부모)
+  // -------------------------------------------------------
+  // 주의: 개발 환경에서만 사용하세요.
+  await prisma.orderExecution.deleteMany();
+  await prisma.roubizOrder.deleteMany();
+  await prisma.clientOrder.deleteMany();
+  await prisma.warehouseStock.deleteMany();
+  await prisma.clientProductMapping.deleteMany();
+  
+  console.log('🧹 기존 트랜잭션 데이터 초기화 완료');
+
+  // -------------------------------------------------------
+  // [1] 기초 마스터 (본사, 거래처, 창고, 택배사)
+  // -------------------------------------------------------
+  
+  // 1. 본사
   const biz = await prisma.business.upsert({
     where: { businessName: '루트바이 본사' },
     update: {},
     create: { businessName: '루트바이 본사', ownerName: '김서늬' }
   });
 
-  // 2. Client(판매처) 생성 (중복 체크 후 생성)
-  // Client 테이블의 name은 unique가 아닐 수 있으므로 findFirst로 확인
-  let client = await prisma.client.findFirst({ 
-    where: { name: '테스트스토어' } 
-  });
-
-  if (!client) {
-    client = await prisma.client.create({
-      data: {
-        businessId: biz.id,
-        name: '테스트스토어',
-        code: 'TEST_001',
-        waybillFormat: { 
-          "주문번호": "clientOrder.clientOrderNo", 
-          "택배사": "carrier.name", 
-          "송장번호": "trackingNumber" 
-        } 
-      }
-    });
-    console.log(` - Client 생성됨: ${client.name}`);
-  } else {
-    console.log(` - Client 이미 존재함: ${client.name}`);
-  }
-
-  // 3. 택배사 및 매핑 등록 (Upsert 사용)
-  
-  // 3-1. CJ대한통운
-  await prisma.carrier.upsert({
-    where: { code: 'CJ' },
-    update: {}, // 이미 있으면 아무것도 안 함
-    create: {
-      code: 'CJ',
-      name: 'CJ대한통운',
-      type: 'PARCEL',
-      mappings: {
-        create: [
-          { alias: 'CJ택배' },
-          { alias: '대한통운' },
-          { alias: 'cj' }
-        ]
-      }
-    }
-  });
-
-  // 3-2. 우체국택배
-  await prisma.carrier.upsert({
-    where: { code: 'POST' },
+  // 2. 판매처 (Client)
+  const client = await prisma.client.upsert({
+    where: { id: 1 },
     update: {},
     create: {
-      code: 'POST',
-      name: '우체국택배',
-      type: 'PARCEL',
-      mappings: {
-        create: [
-          { alias: '우체국' },
-          { alias: 'epost' }
-        ]
-      }
+      businessId: biz.id,
+      name: '테스트스토어', // ★ 주문서의 channelName과 일치해야 함
+      waybillFormat: JSON.stringify({
+        "주문번호": "clientOrder.clientOrderNo", 
+        "송장번호": "execution.trackingNumber",
+        "택배사": "execution.carrier.name" 
+      })
     }
   });
 
-  // [추가] 테스트용 상품 생성 (Upsert)
+  // 3. 창고 (Warehouse)
+  const warehouse = await prisma.warehouse.upsert({
+    where: { id: 1 },
+    update: {},
+    create: {
+      businessId: biz.id,
+      name: '용인 메인창고',
+      location: '경기도 용인시 처인구'
+    }
+  });
+
+  // 4. 택배사 (Carrier)
+  await prisma.carrier.upsert({
+    where: { code: 'CJ' },
+    update: {},
+    create: {
+      code: 'CJ', name: 'CJ대한통운', type: 'PARCEL',
+      mappings: { create: [{ alias: 'CJ택배' }] }
+    }
+  });
+
+  // -------------------------------------------------------
+  // [2] 상품 및 재고 (Product & Inventory)
+  // -------------------------------------------------------
+
+  // 5. 상품 생성 (홍삼정)
   const product = await prisma.roubizProduct.upsert({
     where: { roubizCode: 'P_TEST_001' },
     update: {},
-    create: {
-      roubizCode: 'P_TEST_001',
-      name: '테스트용 홍삼정',
-      standardCost: 5000
+    create: { roubizCode: 'P_TEST_001', name: '테스트용 홍삼정', standardCost: 5000 }
+  });
+
+  // 6. 상품 매핑 (판매처 코드 'P001' -> 내부 코드 'P_TEST_001')
+  // ★ 중요: targetWarehouseId가 있어야 창고 출고로 잡힘
+  await prisma.clientProductMapping.create({
+    data: {
+      clientId: client.id,
+      clientProductCode: 'P001',      // 주문 들어올 때 코드
+      clientOptionName: '옵션없음',    // 옵션명
+      roubizProductId: product.id,
+      targetWarehouseId: warehouse.id // 이 상품은 '용인창고'에서 출고
     }
   });
 
-  // 4. 테스트용 주문 생성 (중복 체크)
-  // RoubizOrderNo는 Unique하므로 이를 기준으로 존재 여부 확인
-  const existingOrder = await prisma.roubizOrder.findUnique({
-    where: { roubizOrderNo: 'R-TEST-001' }
+  // 7. 기초 재고 세팅 (1,000개)
+  // ★ 중요: 이게 있어야 allocateStock(재고할당)이 성공함
+  await prisma.warehouseStock.create({
+    data: {
+      warehouseId: warehouse.id,
+      roubizProductId: product.id,
+      quantity: 1000, // 넉넉하게
+      allocated: 0
+    }
   });
 
-  if (!existingOrder) {
-    await prisma.clientOrder.create({
-      data: {
-        clientId: client.id, // [변경] client.id 사용
-        clientOrderNo: 'ORD-20240209-01',
-        productCode: 'P001',
-        optionName: '기본',
-        quantity: 1,
-        salesPrice: 10000,
-        orderDate: new Date(),
-        isConverted: true,
-        roubizOrders: {
-          create: {
-            roubizOrderNo: 'R-TEST-001', // ★ 이 번호로 중복 체크
-            roubizProductId: product.id,
-            quantity: 1,
-            status: 'READY' // 발주 대기 상태
-          }
-        }
-      }
-    });
-    console.log(` - Test Order 생성됨: R-TEST-001`);
-  } else {
-    console.log(` - Test Order 이미 존재함: R-TEST-001`);
-  }
-
-  console.log(`✅ 시딩 완료!`);
+  console.log(`✅ [마스터] 상품/창고/매핑 생성 완료`);
+  console.log(`✅ [재고] ${product.name} : 1,000개 세팅 완료`);
+  console.log(`🚀 시딩 완료! 이제 API 테스트를 진행하세요.`);
 }
 
 main()
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+  .catch((e) => { console.error(e); process.exit(1); })
+  .finally(async () => { await prisma.$disconnect(); });

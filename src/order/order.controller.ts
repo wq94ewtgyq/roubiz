@@ -1,235 +1,155 @@
-import { Controller, Post, Get, Delete, Param, UseInterceptors, UploadedFile, Body, BadRequestException, Res } from '@nestjs/common';
-import type { Response } from 'express'; 
+import { Controller, Post, Body, UploadedFile, UseInterceptors, Get, BadRequestException } from '@nestjs/common';
 import { OrderService } from './order.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { CreateSupplierOrderDto } from './dto/create-supplier-order.dto';
-import { ApiTags, ApiOperation, ApiConsumes, ApiBody } from '@nestjs/swagger';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { ExcelService } from '../common/excel.service';
-import { PrismaClient } from '@prisma/client';
+import { ApiBody, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ExcelService } from '../common/excel.service'; 
 
-const prisma = new PrismaClient();
-
-@ApiTags('Order (주문 수집 & 발주)')
+@ApiTags('주문(Order)')
 @Controller('order')
 export class OrderController {
   constructor(
     private readonly orderService: OrderService,
-    private readonly excelService: ExcelService
+    private readonly excelService: ExcelService 
   ) {}
 
   @Post()
-  @ApiOperation({ summary: '주문 1건 등록 (테스트용)' })
-  create(@Body() dto: CreateOrderDto) {
-    return this.orderService.create(dto);
-  }
-
-  // [NEW] 출고처 변경 API (PM님 요청 기능)
-  @Post('change-source')
-  @ApiOperation({ summary: '주문 출고처 변경 (발주 ↔ 창고 유연한 전환)' })
-  @ApiBody({ 
-    schema: { 
-      type: 'object', 
-      properties: { 
-        roubizOrderIds: { type: 'array', items: { type: 'number' } },
-        sourceType: { type: 'string', enum: ['SUPPLIER', 'WAREHOUSE'] },
-        warehouseId: { type: 'number', description: '창고 출고 선택 시 필수' }
-      } 
-    } 
-  })
-  changeSource(@Body() body: { roubizOrderIds: number[], sourceType: 'SUPPLIER' | 'WAREHOUSE', warehouseId?: number }) {
-    return this.orderService.changeOrderSource(body);
-  }
-
-  @Post('confirm')
-  @ApiOperation({ summary: '주문 확정 (임시 -> 발주대기)' })
-  @ApiBody({ 
-    schema: { 
-      type: 'object', 
-      properties: { roubizOrderIds: { type: 'array', items: { type: 'number' }, example: [1, 2, 3] } } 
-    } 
-  })
-  confirm(@Body('roubizOrderIds') ids: number[]) {
-    return this.orderService.confirmOrders(ids);
-  }
-
-  @Get('dashboard')
-  @ApiOperation({ summary: '발주 관제 대시보드 조회 (대기/보류/지정일 분류)' })
-  getDashboard() {
-    return this.orderService.getDispatchDashboard();
-  }
-
-  @Post('hold-request')
-  @ApiOperation({ summary: '발주 보류 설정 (사유 필수)' })
-  @ApiBody({ 
-    schema: { 
-      type: 'object', 
-      properties: { 
-        roubizOrderIds: { type: 'array', items: { type: 'number' } },
-        reason: { type: 'string', description: '보류 사유' },
-        type: { type: 'string', enum: ['MANUAL', 'NEXT_ROUND'], description: '보류 타입' }
-      } 
-    } 
-  })
-  setHold(@Body() body: { roubizOrderIds: number[], reason: string, type: 'MANUAL' | 'NEXT_ROUND' }) {
-    return this.orderService.setHoldStatus({ ids: body.roubizOrderIds, reason: body.reason, type: body.type });
-  }
-
-  @Post('schedule-request')
-  @ApiOperation({ summary: '지정일 배송 설정 (사유 필수)' })
-  @ApiBody({ 
-    schema: { 
-      type: 'object', 
-      properties: { 
-        roubizOrderIds: { type: 'array', items: { type: 'number' } },
-        targetDate: { type: 'string', format: 'date', example: '2026-02-15' },
-        reason: { type: 'string' }
-      } 
-    } 
-  })
-  setSchedule(@Body() body: { roubizOrderIds: number[], targetDate: string, reason: string }) {
-    return this.orderService.setSchedule(body.roubizOrderIds, body.targetDate, body.reason);
-  }
-
-  @Post('generate-po')
-  @ApiOperation({ summary: '발주서 생성 (발주대기 -> 발주완료)' })
-  @ApiBody({ type: CreateSupplierOrderDto })
-  generatePO(@Body() dto: CreateSupplierOrderDto) {
-    return this.orderService.createSupplierOrders(dto);
-  }
-
-  @Post('cancel-po')
-  @ApiOperation({ summary: '발주서 삭제 (출력 취소)' })
-  @ApiBody({ schema: { type: 'object', properties: { supplierOrderId: { type: 'number' } } } })
-  cancelPO(@Body('supplierOrderId') id: number) {
-    return this.orderService.cancelSupplierOrder(id);
-  }
-
-  @Post('rollback')
-  @ApiOperation({ summary: '주문 상태 복구 (발주완료 -> 발주대기)' })
-  @ApiBody({ schema: { type: 'object', properties: { roubizOrderIds: { type: 'array', items: { type: 'number' } } } } })
-  rollback(@Body('roubizOrderIds') ids: number[]) {
-    return this.orderService.rollbackOrders(ids);
-  }
-
-  @Get('download-po/:id')
-  @ApiOperation({ summary: '발주서 엑셀 다운로드' })
-  async downloadPO(@Param('id') id: string, @Res() res: Response) {
-    const order = await this.orderService.findSupplierOrder(+id);
-
-    const excelData = order.items.map((item, index) => ({
-      'No': index + 1,
-      '발주번호': order.supplierOrderNo,
-      '발주차수': `${order.round}차`,
-      '매입처': order.supplier.name,
-      '상품명': item.roubizProduct.name,
-      '상품코드': item.roubizProduct.roubizCode,
-      '발주수량': item.quantity,
-      '공급단가': Number(item.unitCost),
-      '합계금액': Number(item.unitCost) * item.quantity,
-      '비고': ''
-    }));
-
-    const buffer = this.excelService.writeExcel(excelData);
-
-    const formatConfig = (order.supplier.orderFormat as any) || {};
-    const fileNamePattern = formatConfig.fileNamePattern || '{거래처명}_{발주차수}발주서_{발주일_단축}';
-
-    const now = new Date();
-    const yyyy = now.getFullYear();
-    const mm = String(now.getMonth() + 1).padStart(2, '0');
-    const dd = String(now.getDate()).padStart(2, '0');
-    const dateLong = `${yyyy}-${mm}-${dd}`;   
-    const dateShort = `${yyyy.toString().slice(2)}${mm}${dd}`;
-
-    const finalFileName = fileNamePattern
-      .replace(/{발주일}/g, dateLong)
-      .replace(/{발주일_단축}/g, dateShort)
-      .replace(/{거래처명}/g, order.supplier.name)
-      .replace(/{사업자명}/g, order.supplier.business.businessName)
-      .replace(/{발주번호}/g, order.supplierOrderNo)
-      .replace(/{발주차수}/g, `${order.round}차`);
-
-    const encodedFileName = encodeURIComponent(`${finalFileName}.xlsx`);
-
-    res.set({
-      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'Content-Disposition': `attachment; filename="${encodedFileName}"`,
-    });
-    res.send(buffer);
-  }
-
-  @Post('upload')
-  @ApiOperation({ summary: '엑셀 업로드 (파일명 인식)' })
+  @ApiOperation({ summary: '주문 수집 (엑셀 업로드)' })
   @ApiConsumes('multipart/form-data')
   @UseInterceptors(FileInterceptor('file'))
   @ApiBody({
     schema: {
       type: 'object',
       properties: {
-        file: {
-          type: 'string',
-          format: 'binary',
-          description: '파일명에 Client명(예: 쿠팡) 필수 포함',
-        },
+        file: { type: 'string', format: 'binary' },
+        channelName: { type: 'string', example: '테스트스토어' }
       },
     },
   })
-  async uploadExcel(@UploadedFile() file: Express.Multer.File) {
-    const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+  async uploadOrder(@UploadedFile() file: Express.Multer.File, @Body() body: { channelName: string }) {
+    if (!file) throw new BadRequestException('파일이 없습니다.');
     
-    // Client 조회
-    const clients = await prisma.client.findMany();
-    const matchedClient = clients.find(c => originalName.includes(c.name));
-
-    if (!matchedClient) {
-      throw new BadRequestException(`❌ 파일명(${originalName})에서 Client(판매처)를 인식할 수 없습니다. (등록된 Client: ${clients.map(c => c.name).join(', ')})`);
-    }
-
     const rows = this.excelService.readExcel(file.buffer);
-    const results: any[] = []; 
+    
+    // [수정] TS2345 에러 해결을 위해 타입을 any[]로 명시
+    const results: any[] = [];
+    const errors: any[] = [];
 
-    const mapping = (matchedClient.excelMapping as any) || {
-        orderNo: '주문번호',
-        productCode: '상품코드',
-        optionName: '옵션명',
-        qty: '수량',
-        price: '판매가'
-    };
+    for (const [index, row] of rows.entries()) {
+        try {
+            const dto: CreateOrderDto = {
+                channelName: body.channelName,
+                orderNo: String(row['주문번호'] || row['OrderNo'] || `AUTO-${Date.now()}-${index}`),
+                productCode: String(row['상품코드'] || row['ProductCode'] || ''),
+                optionName: String(row['옵션'] || row['Option'] || '옵션없음'),
+                quantity: Number(row['수량'] || row['Quantity'] || 1),
+                price: Number(row['판매가'] || row['Price'] || 0)
+            };
+            
+            if (!dto.productCode) throw new Error('상품코드 누락');
+            
+            const res = await this.orderService.create(dto);
+            results.push({ row: index + 1, status: 'SUCCESS', ...res });
 
-    for (const row of rows) {
-      const dto = new CreateOrderDto();
-      dto.channelName = matchedClient.name; 
-      
-      dto.orderNo = row[mapping.orderNo] ? String(row[mapping.orderNo]) : `AUTO-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
-      dto.productCode = row[mapping.productCode] ? String(row[mapping.productCode]) : 'UNKNOWN';
-      dto.optionName = row[mapping.optionName] ? String(row[mapping.optionName]) : '';
-      dto.quantity = Number(row[mapping.qty] || 1);
-      dto.price = Number(row[mapping.price] || 0);
-
-      try {
-        const res = await this.orderService.create(dto);
-        results.push({ 
-            orderNo: dto.orderNo, 
-            status: 'SUCCESS', 
-            msg: res.matchResult,
-            roubizOrderNo: res.roubizOrderNo 
-        });
-      } catch (e) {
-        results.push({ orderNo: dto.orderNo, status: 'FAIL', msg: e.message });
-      }
+        } catch (e) {
+            errors.push({ row: index + 1, status: 'FAIL', message: e.message });
+        }
     }
 
-    return {
-      message: `[${matchedClient.name}] 업로드 완료`,
-      total: rows.length,
-      successCount: results.filter(r => r.status === 'SUCCESS').length,
-      details: results
+    return { 
+        total: rows.length, 
+        success: results.length, 
+        fail: errors.length, 
+        results, 
+        errors 
     };
   }
 
-  @Post('upload-waybill')
-  @ApiOperation({ summary: '통합 운송장 업로드 (행동: 등록/수정/삭제)' })
+  // [수기 등록 테스트용]
+  @Post('manual')
+  @ApiOperation({ summary: '주문 수기 등록 (테스트)' })
+  create(@Body() createOrderDto: CreateOrderDto) {
+    return this.orderService.create(createOrderDto);
+  }
+
+  // [주문 확정] - Swagger 입력창 강제 생성
+  @Post('confirm')
+  @ApiOperation({ summary: '주문 확정 (PENDING -> READY)' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        roubizOrderIds: { 
+          type: 'array', 
+          items: { type: 'number' }, 
+          example: [1] 
+        }
+      }
+    }
+  })
+  confirm(@Body() body: { roubizOrderIds: number[] }) {
+    return this.orderService.confirmOrders(body.roubizOrderIds);
+  }
+
+  // [주문 보류] - Swagger 입력창 강제 생성
+  @Post('hold')
+  @ApiOperation({ summary: '주문 보류' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        roubizOrderIds: { type: 'array', items: { type: 'number' }, example: [1] },
+        reason: { type: 'string', example: '고객 요청 보류' }
+      }
+    }
+  })
+  hold(@Body() body: { roubizOrderIds: number[], reason: string }) {
+    return this.orderService.setHoldStatus({ ids: body.roubizOrderIds, reason: body.reason });
+  }
+
+  // [배송 전 취소]
+  @Post('cancel')
+  @ApiOperation({ summary: '배송 전 주문 취소 (WAREHOUSE: 할당 해제 / SUPPLIER: 상태 변경)' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['roubizOrderIds', 'reason'],
+      properties: {
+        roubizOrderIds: { type: 'array', items: { type: 'number' }, example: [1] },
+        reason: { type: 'string', example: '고객 요청 취소' },
+      },
+    },
+  })
+  cancel(@Body() body: { roubizOrderIds: number[]; reason: string }) {
+    return this.orderService.cancelOrders({ ids: body.roubizOrderIds, reason: body.reason });
+  }
+
+  @Post('supplier-order')
+  @ApiOperation({ summary: '위탁 발주 생성' })
+  createSupplierOrders(@Body() dto: CreateSupplierOrderDto) {
+    return this.orderService.createSupplierOrders(dto);
+  }
+
+  // [출고처 변경] - Swagger 입력창 강제 생성
+  @Post('change-source')
+  @ApiOperation({ summary: '출고처 변경' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        roubizOrderIds: { type: 'array', items: { type: 'number' }, example: [1] },
+        sourceType: { type: 'string', example: 'WAREHOUSE' },
+        warehouseId: { type: 'number', example: 1 }
+      }
+    }
+  })
+  changeSource(@Body() body: { roubizOrderIds: number[], sourceType: 'SUPPLIER' | 'WAREHOUSE', warehouseId?: number }) {
+    return this.orderService.changeOrderSource(body);
+  }
+
+  @Post('waybill')
+  @ApiOperation({ summary: '운송장 일괄 등록' })
   @ApiConsumes('multipart/form-data')
   @UseInterceptors(FileInterceptor('file'))
   @ApiBody({
@@ -240,39 +160,12 @@ export class OrderController {
       }
     }
   })
-  async uploadWaybill(@UploadedFile() file: Express.Multer.File) {
+  uploadWaybill(@UploadedFile() file: Express.Multer.File) {
     return this.orderService.uploadWaybill(file.buffer);
-  }
-
-  @Post('download-waybill')
-  @ApiOperation({ summary: 'Client 회신용 운송장 엑셀 다운로드' })
-  @ApiBody({ 
-    schema: { 
-      type: 'object', 
-      properties: { 
-        clientId: { type: 'number' },
-        roubizOrderIds: { type: 'array', items: { type: 'number' } } 
-      } 
-    } 
-  })
-  async downloadWaybill(@Body() body: { clientId: number, roubizOrderIds: number[] }, @Res() res: Response) {
-    const result = await this.orderService.downloadWaybillForClient(body.clientId, body.roubizOrderIds);
-    
-    const encodedFileName = encodeURIComponent(result.filename);
-    res.set({
-      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'Content-Disposition': `attachment; filename="${encodedFileName}"`,
-    });
-    res.send(result.buffer);
   }
 
   @Get()
   findAll() {
     return this.orderService.findAll();
-  }
-
-  @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.orderService.remove(+id);
   }
 }

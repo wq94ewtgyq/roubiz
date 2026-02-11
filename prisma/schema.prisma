@@ -10,241 +10,500 @@ datasource db {
 }
 
 // ======================================================
-// [1] 조직/거래처 계층 구조
+// [1] 사업자 (Business) — 모든 거래채널의 기초
 // ======================================================
 
 model Business {
-  id           Int      @id @default(autoincrement())
-  businessName String   @unique 
-  bizNumber    String?  
-  ownerName    String?  
-  
-  clients      Client[]    // SalesChannel -> Client
-  suppliers    Supplier[]
-  warehouses   Warehouse[]
+  id                  Int      @id @default(autoincrement())
+  businessName        String   @unique       // 사업자명 (법인명 / 상호)
+  displayName         String?               // 노출 거래처명
+  businessType        String?               // 법인 | 개인 | 영세
+  businessRegNumber   String?  @unique      // 사업자번호 (xxx-xx-xxxxx)
+  ownerName           String?               // 대표자명
+  registrationDocUrl  String?               // 사업자등록증 파일 경로
+  bankName            String?               // 정산 은행명
+  bankAccount         String?               // 정산 계좌번호
+  bankAccountHolder   String?               // 정산 계좌 예금주
+  bankBookUrl         String?               // 통장 사본 파일 경로
+  registeredAt        DateTime @default(now())
+
+  clients             Client[]
+  warehouses          Warehouse[]
+  suppliers           Supplier[]
+  contacts            ContactHistory[]
 }
 
-// Client (판매처/고객사)
-model Client {
-  id            Int      @id @default(autoincrement())
-  businessId    Int
-  business      Business @relation(fields: [businessId], references: [id])
-  
-  name          String   // 예: 쿠팡, 네이버, 자사몰
-  code          String?  
-  excelMapping  Json?    // 업로드 엑셀 양식 설정
-  
-  // [운송장 회신 양식]
-  waybillFormat Json?    // 예: { "주문번호": "clientOrder.clientOrderNo", ... }
-
-  orders        ClientOrder[]
-  mappings      ClientProductMapping[]
-}
-
-model Supplier {
-  id           Int      @id @default(autoincrement())
-  businessId   Int
-  business     Business @relation(fields: [businessId], references: [id])
-  
-  name         String   // 예: 김씨공장
-  email        String?  
-  orderFormat  Json?    // 발주서 양식 설정
-
-  products     SupplierProduct[]
-  orders       SupplierOrder[]
-}
-
-model Warehouse {
-  id           Int      @id @default(autoincrement())
-  businessId   Int
-  business     Business @relation(fields: [businessId], references: [id])
-  
-  name         String   // 예: 용인창고
-  location     String?  
-  outputFormat Json?    // 송장 양식 설정
-
-  stocks       WarehouseStock[]
-  
-  // [NEW] 매핑 및 주문 연결 (역방향 관계)
-  targetedMappings ClientProductMapping[] 
-  assignedOrders   RoubizOrder[]
+// 거래처 컨택 타임라인
+model ContactHistory {
+  id          Int      @id @default(autoincrement())
+  businessId  Int
+  business    Business @relation(fields: [businessId], references: [id])
+  contactDate DateTime
+  contactType String   // CALL | EMAIL | VISIT | PROPOSAL | MEETING
+  summary     String   @db.Text
+  staffName   String?
+  createdAt   DateTime @default(now())
 }
 
 // ======================================================
-// [2] 상품 (Product)
+// [2] 판매처 (Client / 수주 채널)
+// ======================================================
+
+model Client {
+  id                         Int      @id @default(autoincrement())
+  businessId                 Int
+  business                   Business @relation(fields: [businessId], references: [id])
+
+  name                       String                        // 내부 관리명
+  displayName                String?                       // 노출 거래처명
+  dealStatus                 String   @default("ACTIVE")   // ACTIVE | INACTIVE | PENDING
+  channelType                String?                       // 쇼핑몰 | 특판 | 밴더
+  salesEntity                String?                       // 영업 주체
+
+  // 정산 조건
+  settlementType             String?                       // SUPPLY(공급가/정발행) | COMMISSION(수수료/역발행)
+  settlementGuarantee        Boolean  @default(false)
+  settlementGuaranteeAmt     Decimal? @db.Decimal(15, 2)
+  settlementStartDay         Int?                          // 정산 기준 시작일 (일)
+  settlementEndDay           Int?                          // 정산 기준 종료일 (일)
+  settlementCondition        String?                       // 정산 기준 조건 설명
+  settlementMonth            Int?                          // 정산월 (N개월 후)
+  settlementPayDay           Int?                          // 정산 결제일 (일)
+  accountHolder              String?                       // 예금주명
+  settlementAccount          String?                       // 정산 계좌
+
+  // 수주 업로드 양식 (INPUT) — JSON 컬럼 매핑
+  orderUploadFormat          String?  @db.Text             // { "주문번호": "A열", ... }
+  orderUploadRecognizer      String?                       // 업로드 식별 컬럼명
+
+  // 운송장 출력 양식 (기존 호환 유지)
+  waybillFormat              String?  @db.Text
+
+  // 정산 출력 양식
+  settlementOutputFormat     String?  @db.Text
+  settlementOutputRecognizer String?
+
+  registeredAt               DateTime @default(now())
+
+  orders                     ClientOrder[]
+  clientProducts             ClientProduct[]
+  mappings                   ClientProductMapping[]
+}
+
+// ======================================================
+// [3] 매입처 (Supplier)
+// ======================================================
+
+model Supplier {
+  id                         Int      @id @default(autoincrement())
+  businessId                 Int
+  business                   Business @relation(fields: [businessId], references: [id])
+
+  name                       String
+  displayName                String?
+  dealStatus                 String   @default("ACTIVE")  // ACTIVE | INACTIVE | PENDING
+  channelType                String?
+
+  // 정산 조건
+  settlementGuarantee        Boolean  @default(false)
+  settlementGuaranteeAmt     Decimal? @db.Decimal(15, 2)
+  settlementType             String?
+  settlementStartDay         Int?
+  settlementEndDay           Int?
+  settlementCondition        String?
+  settlementMonth            Int?
+  settlementPayDay           Int?
+  settlementAccount          String?
+
+  // 발주 출력 양식 (OUTPUT)
+  orderOutputFormat          String?  @db.Text             // JSON 컬럼 매핑
+  orderOutputFilename        String?                       // 파일명 구조
+
+  // 정산 양식
+  settlementOutputFormat     String?  @db.Text
+  settlementOutputRecognizer String?
+
+  registeredAt               DateTime @default(now())
+
+  executions                 OrderExecution[]
+  products                   SupplierProduct[]
+}
+
+// ======================================================
+// [4] 창고 (Warehouse)
+// ======================================================
+
+model Warehouse {
+  id                         Int      @id @default(autoincrement())
+  businessId                 Int
+  business                   Business @relation(fields: [businessId], references: [id])
+
+  name                       String
+  displayName                String?
+  warehouseCode              String?  @unique              // 창고 코드 (고유)
+  dealStatus                 String   @default("ACTIVE")
+  location                   String?
+
+  // 정산 조건
+  settlementMonth            Int?
+  settlementPayDay           Int?
+  settlementAccount          String?
+
+  // 발주 출력 양식 (OUTPUT)
+  outputFormat               String?  @db.Text
+  outputFilename             String?
+
+  // 정산 양식
+  settlementOutputFormat     String?  @db.Text
+  settlementOutputRecognizer String?
+
+  registeredAt               DateTime @default(now())
+
+  stocks                     WarehouseStock[]
+  executions                 OrderExecution[]
+  stockTransfersFrom         StockTransfer[]  @relation("transferFrom")
+  stockTransfersTo           StockTransfer[]  @relation("transferTo")
+}
+
+// ======================================================
+// [5] 매입상품 (RoubizProduct) — DB 상품코드 기초 (R#####)
 // ======================================================
 
 model RoubizProduct {
   id               Int      @id @default(autoincrement())
-  roubizCode       String   @unique 
-  name             String   
-  standardCost     Decimal? 
-  isSet            Boolean  @default(false)
+  roubizCode       String   @unique   // R00001, R00002 …
+
+  // 운영 상태
   status           String   @default("ACTIVE")
-  
-  roubizOrders     RoubizOrder[]
+  // ACTIVE | SOLDOUT | DISCONTINUED | SUSPENDED
+  productType      String   @default("CONSIGNMENT")
+  // CONSIGNMENT(위탁) | PURCHASE(사입)
+  isSeasonal       Boolean  @default(false)
+  seasonType       String?  // HOLIDAY | SUMMER | WINTER
+
+  // 분류
+  category         String?
+  subCategory      String?
+  item             String?  // 품목
+  brand            String?
+
+  // 상품 정보
+  name             String
+  optionName       String?
+
+  // 매입 단가
+  standardCost     Decimal? @db.Decimal(15, 2)
+
+  // 배송비
+  shippingFeeType  String?  // FREE | CONDITIONAL | PAID
+  shippingFee      Decimal? @db.Decimal(15, 2)
+  boxShippingFee   Decimal? @db.Decimal(15, 2)  // 박스 배송비
+  boxQuantity      Int?                           // 박스 입수량
+  remoteAreaFee    Decimal? @db.Decimal(15, 2)   // 도서산간
+  returnCost       Decimal? @db.Decimal(15, 2)   // 반품 비용
+
+  registeredAt     DateTime @default(now())
+
+  stocks           WarehouseStock[]
   clientMappings   ClientProductMapping[]
   supplierProducts SupplierProduct[]
-  warehouseStocks  WarehouseStock[]
-  
-  parentBundles    ProductBundle[] @relation("ParentProduct")
-  childBundles     ProductBundle[] @relation("ChildProduct")
-  
-  supplierOrderItems SupplierOrderItem[]
-}
-
-model ProductBundle {
-  id              Int           @id @default(autoincrement())
-  parentProductId Int           
-  parentProduct   RoubizProduct @relation("ParentProduct", fields: [parentProductId], references: [id])
-  childProductId  Int           
-  childProduct    RoubizProduct @relation("ChildProduct", fields: [childProductId], references: [id])
-  quantity        Int           
-  @@unique([parentProductId, childProductId], name: "parentProductId_childProductId")
+  roubizOrders     RoubizOrder[]
+  setItems         SetProductItem[]
 }
 
 // ======================================================
-// [3] 매핑 (Mapping)
+// [6] 매출상품 (ClientProduct) — 판매처별 상품 마스터
 // ======================================================
 
+model ClientProduct {
+  id                Int      @id @default(autoincrement())
+  clientId          Int
+  client            Client   @relation(fields: [clientId], references: [id])
+
+  status            String   @default("ACTIVE")  // ACTIVE | INACTIVE
+  clientProductCode String
+  productName       String
+  optionName        String?
+
+  salesPrice        Decimal? @db.Decimal(15, 2)
+  commissionRate    Decimal? @db.Decimal(5, 2)   // 수수료율 (%)
+
+  // 배송비
+  shippingFeeType   String?  // FREE | CONDITIONAL | PAID
+  shippingFee       Decimal? @db.Decimal(15, 2)
+  freeShippingType  String?  // AMOUNT | QUANTITY
+  freeShippingValue Decimal? @db.Decimal(15, 2)
+
+  taxType           String?  @default("TAXABLE")  // TAXABLE | TAX_EXEMPT
+
+  @@unique([clientId, clientProductCode, optionName], name: "client_product_unique")
+}
+
+// 매출코드 ↔ 매입상품 매핑 (주문 자동 변환 — 기존 로직 유지)
 model ClientProductMapping {
   id                Int           @id @default(autoincrement())
-  clientId          Int           // clientId
+  clientId          Int
   client            Client        @relation(fields: [clientId], references: [id])
-  
-  clientProductCode String        
-  clientOptionName  String        
-  
+  clientProductCode String
+  clientOptionName  String
+
   roubizProductId   Int
   roubizProduct     RoubizProduct @relation(fields: [roubizProductId], references: [id])
+  targetWarehouseId Int?          // 기본 출고 창고 (없으면 위탁)
 
-  // [NEW] ★ 지정 출고처 (파생상품 개념 구현)
-  // NULL: 본사 위탁 발주 (Supplier) - 기본값
-  // 값 있음: 해당 창고 재고 우선 사용 (Warehouse)
-  targetWarehouseId Int?          
-  targetWarehouse   Warehouse?    @relation(fields: [targetWarehouseId], references: [id])
-  
   @@unique([clientId, clientProductCode, clientOptionName], name: "client_product_option")
 }
 
-model SupplierProduct {
-  id                  Int           @id @default(autoincrement())
-  supplierId          Int           
-  supplier            Supplier      @relation(fields: [supplierId], references: [id])
-  
-  roubizProductId     Int
-  roubizProduct       RoubizProduct @relation(fields: [roubizProductId], references: [id])
-  supplierProductCode String?       
-  costPrice           Decimal       
-  isPrimary           Boolean       @default(false) 
-  
-  @@unique([supplierId, roubizProductId], name: "supplierId_roubizProductId") 
-}
-
 // ======================================================
-// [4] 주문 & 재고 흐름
+// [7] 세트상품 (SetProduct) — SR#####
 // ======================================================
 
-model ClientOrder {
-  id             Int          @id @default(autoincrement())
-  clientId       Int          // clientId
-  client         Client       @relation(fields: [clientId], references: [id])
-  
-  clientOrderNo  String   
-  productCode    String   
-  optionName     String?  
-  quantity       Int
-  salesPrice     Decimal? 
-  orderDate      DateTime 
-  uploadedAt     DateTime     @default(now())
-  isConverted    Boolean      @default(false) 
-  roubizOrders   RoubizOrder[]
+model SetProduct {
+  id           Int              @id @default(autoincrement())
+  setCode      String           @unique  // SR00001
+  status       String           @default("ACTIVE")
+  setType      String           // QUANTITY(수량 세트) | COMBINED(결합 세트)
+  brand        String?
+  name         String
+  totalCost    Decimal?         @db.Decimal(15, 2)  // 매입단가 합계 (자동계산)
+  shippingFee  Decimal?         @db.Decimal(15, 2)
+  boxQuantity  Int?
+  registeredAt DateTime         @default(now())
+
+  items        SetProductItem[]
 }
 
-model RoubizOrder {
+model SetProductItem {
   id              Int           @id @default(autoincrement())
-  clientOrderId   Int
-  clientOrder     ClientOrder   @relation(fields: [clientOrderId], references: [id])
-  roubizOrderNo   String        @unique 
+  setProductId    Int
+  setProduct      SetProduct    @relation(fields: [setProductId], references: [id])
   roubizProductId Int
   roubizProduct   RoubizProduct @relation(fields: [roubizProductId], references: [id])
-  quantity        Int           
-  status          String        @default("PENDING") // PENDING, READY, ORDERED, HOLD, SCHEDULED, SHIPPING
-  
-  // [NEW] ★ 이 주문 건은 어디서 처리할 것인가? (유연한 변경 가능)
-  // 'SUPPLIER' (발주) / 'WAREHOUSE' (창고재고)
-  sourceType      String        @default("SUPPLIER") 
-
-  // [NEW] 창고 출고일 경우, 어느 창고인가?
-  warehouseId     Int?          
-  warehouse       Warehouse?    @relation(fields: [warehouseId], references: [id])
-
-  // [발주 관제 필드]
-  targetOrderDate DateTime?     @default(now())     
-  holdReason      String?       
-  isNextRound     Boolean       @default(false)     
-
-  // [배송 정보]
-  carrierId       Int?
-  carrier         Carrier?      @relation(fields: [carrierId], references: [id])
-  trackingNumber  String?       
-  shippedAt       DateTime?     
-
-  createdAt       DateTime      @default(now())
+  quantity        Int
 }
 
-model SupplierOrder {
+// ======================================================
+// [8] 공급사-상품 연결
+// ======================================================
+
+model SupplierProduct {
   id              Int           @id @default(autoincrement())
-  supplierId      Int           
+  supplierId      Int
   supplier        Supplier      @relation(fields: [supplierId], references: [id])
-  
-  supplierOrderNo String        @unique 
-  round           Int           @default(1) 
-  status          String        @default("PENDING") 
-  orderedAt       DateTime      @default(now())
-  items           SupplierOrderItem[]
+  roubizProductId Int
+  roubizProduct   RoubizProduct @relation(fields: [roubizProductId], references: [id])
+  costPrice       Decimal       @db.Decimal(15, 2)
+  isPrimary       Boolean       @default(false)
+
+  @@unique([supplierId, roubizProductId])
 }
 
-model SupplierOrderItem {
-  id              Int           @id @default(autoincrement())
-  supplierOrderId Int
-  supplierOrder   SupplierOrder @relation(fields: [supplierOrderId], references: [id])
-  roubizProductId Int           
-  roubizProduct   RoubizProduct @relation(fields: [roubizProductId], references: [id])
-  quantity        Int           
-  unitCost        Decimal?      
-}
+// ======================================================
+// [9] 창고 재고
+// ======================================================
 
 model WarehouseStock {
   id              Int           @id @default(autoincrement())
-  warehouseId     Int           
+  warehouseId     Int
   warehouse       Warehouse     @relation(fields: [warehouseId], references: [id])
-  
   roubizProductId Int
   roubizProduct   RoubizProduct @relation(fields: [roubizProductId], references: [id])
-  quantity        Int           @default(0)
+
+  quantity        Int           @default(0)  // 실재고
+  allocated       Int           @default(0)  // 할당재고 (주문확정 시 증가)
 
   @@unique([warehouseId, roubizProductId], name: "warehouse_product_stock")
 }
 
+// 재고 이관
+model StockTransfer {
+  id              Int       @id @default(autoincrement())
+  fromWarehouseId Int
+  fromWarehouse   Warehouse @relation("transferFrom", fields: [fromWarehouseId], references: [id])
+  toWarehouseId   Int
+  toWarehouse     Warehouse @relation("transferTo", fields: [toWarehouseId], references: [id])
+  roubizProductId Int
+  quantity        Int
+  reason          String?
+  transferredAt   DateTime  @default(now())
+}
+
 // ======================================================
-// [5] 택배사 및 배송 관리
+// [10] 수주 및 실행
+// ======================================================
+
+// 수주 원본 (판매처로부터 수신한 데이터)
+model ClientOrder {
+  id            Int      @id @default(autoincrement())
+  clientId      Int
+  client        Client   @relation(fields: [clientId], references: [id])
+  clientOrderNo String
+  productCode   String
+  optionName    String?
+  quantity      Int
+  salesPrice    Decimal? @db.Decimal(15, 2)
+  orderDate     DateTime
+  isConverted   Boolean  @default(false)
+
+  roubizOrder   RoubizOrder?
+}
+
+// 매출 원장 (Sales Master) — 고객 주문 불변
+model RoubizOrder {
+  id              Int      @id @default(autoincrement())
+  clientOrderId   Int      @unique
+  clientOrder     ClientOrder @relation(fields: [clientOrderId], references: [id])
+
+  roubizOrderNo   String   @unique  // R-YYMMDD-XXXXX
+  roubizProductId Int
+  roubizProduct   RoubizProduct @relation(fields: [roubizProductId], references: [id])
+
+  quantity        Int
+  status          String   @default("PENDING")
+  // PENDING | READY | PARTIAL | COMPLETED | HOLD | CANCELLED
+
+  executions      OrderExecution[]
+  histories       OrderHistory[]
+  csItems         Cs[]
+
+  createdAt       DateTime @default(now())
+}
+
+// 실행 원장 (Execution Master) — 물류/매입 움직임
+model OrderExecution {
+  id             Int           @id @default(autoincrement())
+  orderId        Int
+  order          RoubizOrder   @relation(fields: [orderId], references: [id])
+
+  // 실행번호: R-..._1x1 (단건), R-..._1x3 (분할)
+  executionNo    String        @unique
+
+  executionType  String        // WAREHOUSE | SUPPLIER
+  quantity       Int
+
+  // [A] 창고 출고일 경우
+  warehouseId    Int?
+  warehouse      Warehouse?    @relation(fields: [warehouseId], references: [id])
+
+  // [B] 위탁 발주(PO)일 경우
+  supplierId     Int?
+  supplier       Supplier?     @relation(fields: [supplierId], references: [id])
+
+  status         String
+  // PENDING | READY | INSTRUCTED | SHIPPING | RETURNED | CANCELLED
+
+  carrierId      Int?
+  carrier        Carrier?      @relation(fields: [carrierId], references: [id])
+  trackingNumber String?
+  shippedAt      DateTime?
+}
+
+// 주문 이력
+model OrderHistory {
+  id         Int         @id @default(autoincrement())
+  orderId    Int
+  order      RoubizOrder @relation(fields: [orderId], references: [id])
+  prevStatus String
+  nextStatus String
+  reason     String?
+  changedAt  DateTime    @default(now())
+}
+
+// ======================================================
+// [11] CS / AS 관리
+// ======================================================
+
+model Cs {
+  id          Int      @id @default(autoincrement())
+  csNo        String   @unique  // CS-YYYYMMDD-XXXXX
+
+  status      String   @default("TEMP_REGISTERED")
+  // TEMP_REGISTERED(임시등록) | CONFIRMED(확정) |
+  // RECEIVED_PENDING(접수대기) | RECEIVED(접수완료) |
+  // PROCESSING_PENDING(처리대기) | PROCESSING_COMPLETE(처리완료)
+
+  orderId     Int?
+  order       RoubizOrder? @relation(fields: [orderId], references: [id])
+
+  csType      String?  // RETURN | EXCHANGE | CANCEL | INQUIRY | OTHER
+  reason      String?
+  description String?  @db.Text
+  clientName  String?  // 고객 이름 / 연락처
+
+  tasks       CsTask[]
+  histories   CsHistory[]
+  createdAt   DateTime @default(now())
+}
+
+model CsTask {
+  id        Int      @id @default(autoincrement())
+  csId      Int
+  cs        Cs       @relation(fields: [csId], references: [id])
+  taskType  String   // RETURN_STOCK_RESTORE | CANCEL_PROCESS | EXCHANGE_SHIP | OTHER
+  isDone    Boolean  @default(false)
+  doneAt    DateTime?
+  note      String?
+}
+
+model CsHistory {
+  id         Int      @id @default(autoincrement())
+  csId       Int
+  cs         Cs       @relation(fields: [csId], references: [id])
+  prevStatus String
+  nextStatus String
+  note       String?
+  changedAt  DateTime @default(now())
+}
+
+// ======================================================
+// [12] 택배사
 // ======================================================
 
 model Carrier {
-  id        Int              @id @default(autoincrement())
-  code      String           @unique 
-  name      String           
-  type      String           @default("PARCEL") 
-  active    Boolean          @default(true)
-  
-  mappings  CarrierMapping[] 
-  orders    RoubizOrder[]
+  id         Int              @id @default(autoincrement())
+  code       String           @unique
+  name       String
+  type       String           @default("PARCEL")
+  mappings   CarrierMapping[]
+  executions OrderExecution[]
 }
 
 model CarrierMapping {
-  id        Int      @id @default(autoincrement())
+  id        Int     @id @default(autoincrement())
   carrierId Int
-  carrier   Carrier  @relation(fields: [carrierId], references: [id])
-  alias     String   @unique 
+  carrier   Carrier @relation(fields: [carrierId], references: [id])
+  alias     String  @unique
+}
+
+// ======================================================
+// [13] 이력관리 / 업무량 가중치 점수화
+// ======================================================
+
+model Staff {
+  id         Int         @id @default(autoincrement())
+  name       String
+  email      String      @unique
+  role       String      @default("STAFF")  // STAFF | MANAGER | ADMIN
+  isActive   Boolean     @default(true)
+  workEvents WorkEvent[]
+}
+
+model WorkEventType {
+  id        Int         @id @default(autoincrement())
+  module    String      // ORDER | CS | SETTLEMENT | PRODUCT | PARTNER
+  eventName String      @unique
+  weight    Decimal     @db.Decimal(5, 2)  // 가중치
+  events    WorkEvent[]
+}
+
+model WorkEvent {
+  id          Int           @id @default(autoincrement())
+  staffId     Int
+  staff       Staff         @relation(fields: [staffId], references: [id])
+  eventTypeId Int
+  eventType   WorkEventType @relation(fields: [eventTypeId], references: [id])
+  refId       Int?          // 관련 데이터 ID (주문, CS 등)
+  refType     String?       // RoubizOrder | Cs | …
+  score       Decimal       @db.Decimal(5, 2)  // 이벤트 발생 시점 weight 복사
+  createdAt   DateTime      @default(now())
 }

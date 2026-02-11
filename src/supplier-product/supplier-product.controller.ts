@@ -1,28 +1,31 @@
-// src/supplier-product/supplier-product.controller.ts
-import { Controller, Get, Post, Body, Param, Delete } from '@nestjs/common';
-import { SupplierProductService, CreateSupplierProductDto } from './supplier-product.service';
-import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { Controller, Get, Post, Body, Patch, Param, Delete } from '@nestjs/common';
+import { SupplierProductService } from './supplier-product.service';
+import { CreateSupplierProductDto } from './dto/create-supplier-product.dto'; // ★ 올바른 경로
+import { UpdateSupplierProductDto } from './dto/update-supplier-product.dto';
+import { ApiTags } from '@nestjs/swagger';
 
-@ApiTags('Supplier Product (공급처 상품 매핑)')
+@ApiTags('공급사 상품(매입단가)')
 @Controller('supplier-product')
 export class SupplierProductController {
-  constructor(private readonly service: SupplierProductService) {}
+  constructor(private readonly supplierProductService: SupplierProductService) {}
 
   @Post()
-  @ApiOperation({ summary: '공급처 상품 매핑 등록' })
-  create(@Body() dto: CreateSupplierProductDto) {
-    return this.service.create(dto);
+  create(@Body() createSupplierProductDto: CreateSupplierProductDto) {
+    return this.supplierProductService.create(createSupplierProductDto);
   }
 
   @Get()
-  @ApiOperation({ summary: '전체 공급처 상품 매핑 조회' })
   findAll() {
-    return this.service.findAll();
+    return this.supplierProductService.findAll();
+  }
+
+  @Patch(':id')
+  update(@Param('id') id: string, @Body() updateSupplierProductDto: UpdateSupplierProductDto) {
+    return this.supplierProductService.update(+id, updateSupplierProductDto);
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: '매핑 삭제' })
   remove(@Param('id') id: string) {
-    return this.service.remove(+id);
+    return this.supplierProductService.remove(+id);
   }
 }

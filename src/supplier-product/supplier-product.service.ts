@@ -1,78 +1,56 @@
-// src/supplier-product/supplier-product.service.ts
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { CreateSupplierProductDto } from './dto/create-supplier-product.dto';
+import { UpdateSupplierProductDto } from './dto/update-supplier-product.dto';
 import { PrismaClient } from '@prisma/client';
-
-export class CreateSupplierProductDto {
-  supplierName: string;      
-  roubizCode: string; 
-  supplierProductCode?: string;
-  // supplierProductName?: string; // [삭제] 스키마에서 제외됨
-  costPrice: number;
-}
 
 const prisma = new PrismaClient();
 
 @Injectable()
-export class SupplierProductService { 
-
+export class SupplierProductService {
   async create(dto: CreateSupplierProductDto) {
-    // 1. 루비즈 상품 확인
-    const roubizProduct = await prisma.roubizProduct.findUnique({
-      where: { roubizCode: dto.roubizCode }, 
-    });
-    if (!roubizProduct) throw new NotFoundException(`상품(${dto.roubizCode}) 없음`);
-
-    // 2. 공급처(Supplier) 확인
-    // [변경] BusinessRole -> Supplier
-    let supplier = await prisma.supplier.findFirst({
-      where: { name: dto.supplierName },
-    });
-
-    // [변경] 공급처가 없으면 자동 생성 (기본 사업자에 연결)
+    // 1. 공급사 확인
+    let supplier = await prisma.supplier.findFirst({ where: { name: dto.supplierName } });
+    
     if (!supplier) {
-      const defaultBiz = await prisma.business.findFirst();
-      if (!defaultBiz) throw new NotFoundException('기본 사업자 정보가 없습니다. 시드 데이터를 확인하세요.');
+       // 비즈니스 ID 임시 지정
+       const biz = await prisma.business.findFirst(); 
+       
+       // ★ [Fix] biz가 없을 경우에 대한 예외 처리 추가
+       if (!biz) {
+         throw new NotFoundException('기본 Business(사업자) 정보가 없습니다. DB 시딩을 확인하세요.');
+       }
 
-      supplier = await prisma.supplier.create({
-        data: {
-          businessId: defaultBiz.id, // 첫 번째 사업자에 소속시킴
-          name: dto.supplierName,
-          orderFormat: { type: 'STANDARD' }, // 기본값 설정
-        },
-      });
+       supplier = await prisma.supplier.create({
+         data: { 
+           businessId: biz.id,
+           name: dto.supplierName,
+         }
+       });
     }
 
-    // 3. 중복 확인 (Prisma 유니크 키 규칙 적용)
-    const existing = await prisma.supplierProduct.findUnique({
-      where: {
-        supplierId_roubizProductId: { 
-          supplierId: supplier.id,
-          roubizProductId: roubizProduct.id,
-        },
-      },
-    });
-    if (existing) throw new BadRequestException('이미 등록된 공급처 상품입니다.');
+    // 2. 상품 확인
+    const product = await prisma.roubizProduct.findUnique({ where: { roubizCode: dto.roubizCode } });
+    if (!product) throw new NotFoundException('상품코드 없음');
 
-    // 4. 저장
+    // 3. 연결
     return await prisma.supplierProduct.create({
       data: {
         supplierId: supplier.id,
-        roubizProductId: roubizProduct.id, 
-        supplierProductCode: dto.supplierProductCode || '',
-        // [삭제] supplierProductName 필드는 스키마에서 제거되었으므로 저장하지 않음
+        roubizProductId: product.id,
         costPrice: dto.costPrice,
-        isPrimary: true,
-      },
+        isPrimary: dto.isPrimary || false,
+      }
     });
   }
 
   async findAll() {
-    return await prisma.supplierProduct.findMany({
-      include: { 
-        supplier: true, // [변경] supplier 관계 연결
-        roubizProduct: true 
-      },
-      orderBy: { id: 'desc' },
+    return await prisma.supplierProduct.findMany({ include: { supplier: true, roubizProduct: true } });
+  }
+
+  async update(id: number, dto: UpdateSupplierProductDto) {
+    return await prisma.supplierProduct.update({
+      where: { id },
+      data: { costPrice: dto.costPrice, isPrimary: dto.isPrimary }
     });
   }
 
